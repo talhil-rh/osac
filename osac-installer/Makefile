@@ -504,6 +504,7 @@ else
 		--set keycloak.hostname=https://keycloak-keycloak.$(DOMAIN) \
 		--set keycloak.route.hostname=https://keycloak-keycloak.$(DOMAIN) \
 		--set "bundledVault.keycloakIssuerUrl=https://keycloak-keycloak.$(DOMAIN)/realms/osac" \
+		$(INFRA_HELM_ARGS) \
 		2>/dev/null \
 		| awk \
 			-e '/^kind: Job$$/ { job=1 }' \
@@ -524,6 +525,7 @@ else
 		--set keycloak.uiUrl=https://$(UI_HOSTNAME) \
 		--set "bundledVault.keycloakIssuerUrl=https://keycloak-keycloak.$(DOMAIN)/realms/osac" \
 		$(OIDC_IDP_CA_HELM_ARGS) \
+		$(INFRA_HELM_ARGS) \
 		--timeout "$${helm_timeout_seconds}s" --wait-for-jobs \
 	|| { \
 		echo "=== osac-infra release status ==="; \
