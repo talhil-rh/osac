@@ -734,10 +734,13 @@ Separate external releases installed on Kind (`cert-manager`, `trust-manager`,
 (With `DRY_RUN=1`, `install` renders offline via
 `install-dry-run` and skips the gate — the dry run is itself an offline
 render.) Invalid values — wrong types, negative numbers where only
-zero-or-positive is allowed, unknown keys — fail the install before any
-namespace, secret, or release is created, and before any readiness wait.
-The failure names the offending field and the violated constraint; fix the
-reported value and retry.
+zero-or-positive is allowed, unknown keys in schema-closed sections —
+fail the install before any namespace, secret, or release is created,
+and before any readiness wait. Unknown-key rejection depends on the
+chart's schema: the `osac` chart is closed, while `osac-infra` leaves
+a few sections (`keycloak`, `topolvm`) open, so a typo there is
+accepted rather than rejected. The failure names the offending field
+and the violated constraint; fix the reported value and retry.
 
 The gate validates static inputs only. It does not check that the cluster is
 ready for the installation: prerequisites that must already exist (issuers,

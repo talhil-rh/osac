@@ -229,6 +229,22 @@ while IFS= read -r infra_cmd; do
   esac
 done <<<"${infra_arg_cmds}"
 
+# Gate/install parity for OIDC_IDP_CA_HELM_ARGS: the gate's osac-infra
+# render must apply the same CA input the install's upgrade applies, so an
+# unreadable or schema-breaking CA file fails validation before any cluster
+# change instead of only after install-infra has already run.
+for ca_platform in kind openshift; do
+  ca_plan="${TMP_DIR}/oidc-ca-${ca_platform}.plan"
+  MOCK_LOG="${LOG}" PATH="${STUB_BIN}:${PATH}" \
+    make -C "${SANDBOX}" --no-print-directory -n validate-inputs \
+    PLATFORM="${ca_platform}" PROFILE=dev NS=osac \
+    OIDC_IDP_CA_FILE=/nonexistent-ca.pem \
+    >"${ca_plan}" 2>/dev/null || fail "make -n validate-inputs (${ca_platform}) failed"
+  join_continuations <"${ca_plan}" | grep 'helm template osac-infra' \
+    | grep -q -- '--set-file keycloak.oidcIdpTrust.caPem' \
+    || fail "validate-inputs (${ca_platform}): the gate render omits the OIDC IdP CA input"
+done
+
 # Remote-cluster inputs: the gate must reject invalid static identifiers
 # before any cluster mutation -- install-osac's own re-check runs only after
 # install-infra and namespace creation have already changed the cluster.

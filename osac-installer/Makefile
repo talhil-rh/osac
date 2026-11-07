@@ -653,7 +653,8 @@ ifeq ($(PLATFORM),kind)
 		--namespace osac-infra \
 		-f $(INFRA_VALUES) $(INFRA_VALUES_EXTRA) \
 		--set osacNamespace=$(NS) \
-		$(INFRA_HELM_ARGS) >/dev/null \
+		$(INFRA_HELM_ARGS) \
+		$(OIDC_IDP_CA_HELM_ARGS) >/dev/null \
 	|| { echo "ERROR: invalid installer inputs for osac-infra; no cluster changes were made. Fix the values reported above and retry." >&2; exit 1; }
 	@source scripts/lib.sh && netbox_seed_check osac-infra $(INFRA_CHART) \
 		--namespace osac-infra \
@@ -699,7 +700,8 @@ else
 		--set keycloak.route.hostname=keycloak-keycloak.$(DOMAIN) \
 		--set keycloak.uiUrl=https://$(UI_HOSTNAME) \
 		--set "bundledVault.keycloakIssuerUrl=https://keycloak-keycloak.$(DOMAIN)/realms/osac" \
-		$(INFRA_HELM_ARGS) >/dev/null \
+		$(INFRA_HELM_ARGS) \
+		$(OIDC_IDP_CA_HELM_ARGS) >/dev/null \
 	|| { echo "ERROR: invalid installer inputs for osac-infra; no cluster changes were made. Fix the values reported above and retry." >&2; exit 1; }
 	@source scripts/lib.sh && netbox_seed_check osac-infra $(INFRA_CHART) \
 		--namespace osac-infra \
