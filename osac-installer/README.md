@@ -723,10 +723,15 @@ make sync-charts         # Rebuild chart dependencies (legacy alias; runs helm d
 
 Every installation target (`install`, `install-infra`, `install-osac`,
 `install-devstack`, `install-multicluster`) first runs `validate-inputs`:
-an offline `helm template` of every applicable chart with the exact values
-the installation would use — the same profile values files, `EXTRA_HELM_ARGS`
-overrides, and (on OpenShift) the same read-only cluster lookups for the
-cluster domain and version. (With `DRY_RUN=1`, `install` renders offline via
+an offline `helm template` of the installer's own applicable charts:
+`osac-infra` and `osac`, plus `osac-deps` on OpenShift and `osac-devstack`
+for Kind's `dev-full` profile. Each receives the same profile values files
+and chart-specific overrides as the installation (`INFRA_HELM_ARGS`,
+`EXTRA_HELM_ARGS`, or `DEVSTACK_HELM_ARGS` as applicable), including the
+same read-only OpenShift lookups for the cluster domain and version.
+Separate external releases installed on Kind (`cert-manager`, `trust-manager`,
+`envoy-gateway`, and `strimzi-cluster-operator`) are not rendered by this gate.
+(With `DRY_RUN=1`, `install` renders offline via
 `install-dry-run` and skips the gate — the dry run is itself an offline
 render.) Invalid values — wrong types, negative numbers where only
 zero-or-positive is allowed, unknown keys — fail the install before any

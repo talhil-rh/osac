@@ -114,6 +114,22 @@ STUB
 
 mutation_commands='helm upgrade|kind create|kubectl apply|oc create|oc apply'
 
+assert_prevalidation_commands() {
+  local label=$1 command
+  while IFS= read -r command; do
+    case "${command}" in
+      'helm version '*|'helm dependency build '*|'helm template '*) ;;
+      'helm --repository-config /dev/null dependency build charts/osac') ;;
+      'helm repo add topolvm https://topolvm.github.io/topolvm/ --force-update') ;;
+      'helm repo add netbox https://netbox-community.github.io/netbox-chart/ --force-update') ;;
+      'helm repo add awx-operator https://ansible-community.github.io/awx-operator-helm/ --force-update') ;;
+      'oc get clusterversion version -o jsonpath={.status.desired.version}') ;;
+      'oc get ingresses.config/cluster -o jsonpath={.spec.domain}') ;;
+      *) fail "${label}: command not permitted before validation: ${command}" ;;
+    esac
+  done <"${LOG}"
+}
+
 # The first chart render must precede the first mutating command in every
 # supported installation entry point's expansion.
 assert_renders_first() {
@@ -202,6 +218,7 @@ MOCK_LOG="${LOG}" PATH="${STUB_BIN}:${PATH}" \
     INFRA_HELM_ARGS='--set topolvm.enabled=true' \
     >"${infra_args_plan}" 2>/dev/null || fail "make -n install-infra (openshift) failed"
 infra_arg_cmds=$(join_continuations <"${infra_args_plan}" \
+  | sed -E 's/(helm (template|upgrade))/\n\1/g' \
   | grep -E 'helm (template|upgrade).* osac-(infra|deps) ' || true)
 [ -n "${infra_arg_cmds}" ] \
   || fail "install-infra (openshift): no osac-infra/osac-deps helm commands in the plan"
@@ -226,9 +243,7 @@ if MOCK_LOG="${LOG}" PATH="${STUB_BIN}:${PATH}" \
 fi
 grep -q 'REMOTE_KUBECONFIG_SECRET_NAME must be a DNS subdomain' "${remote_bad_err}" \
   || fail "remote-identifier: the failure did not name the identifier rule"
-if grep -Eq "${mutation_commands}" "${LOG}"; then
-  fail "remote-identifier: a cluster mutation ran despite invalid identifiers"
-fi
+assert_prevalidation_commands remote-identifier
 
 # The identifiers reach the gate's validator through the environment, not
 # through Make expansion into its quoted bash -c string: a quote-bearing
@@ -246,9 +261,7 @@ if MOCK_LOG="${LOG}" PATH="${STUB_BIN}:${PATH}" \
 fi
 grep -q 'REMOTE_KUBECONFIG_SECRET_NAME must be a DNS subdomain' "${TMP_DIR}/remote-inj.err" \
   || fail "remote-injection: the value did not reach the validator as a literal"
-if grep -Eq "${mutation_commands}" "${LOG}"; then
-  fail "remote-injection: shell code from the secret name was executed"
-fi
+assert_prevalidation_commands remote-injection
 
 # The gate's osac-chart render and install-osac's upgrade share the same
 # remote-cluster kubeconfig argument construction (REMOTE_CLUSTER_HELM_ARGS),
@@ -323,9 +336,7 @@ assert_no_mutation_on_failure() {
     fail "${label}: install succeeded despite invalid inputs"
   fi
   grep -q 'helm template' "${LOG}" || fail "${label}: the offline render never ran"
-  if grep -Eq "${mutation_commands}" "${LOG}"; then
-    fail "${label}: a cluster mutation ran despite invalid inputs"
-  fi
+  assert_prevalidation_commands "${label}"
   grep -q 'no cluster changes were made' "${err}" \
     || fail "${label}: the failure did not state that no cluster changes were made"
 }
@@ -335,6 +346,8 @@ assert_no_mutation_on_failure parallel install -j4 PLATFORM=kind PROFILE=dev NS=
 assert_no_mutation_on_failure openshift install PLATFORM=openshift PROFILE=dev NS=osac
 assert_no_mutation_on_failure direct-infra install-infra PLATFORM=openshift PROFILE=dev NS=osac
 assert_no_mutation_on_failure direct-osac install-osac PLATFORM=kind PROFILE=dev NS=osac
+assert_no_mutation_on_failure multicluster install-multicluster \
+  PLATFORM=openshift PROFILE=vmaas-ci NS=osac REMOTE_KUBECONFIG="${LOG}"
 
 echo "input-validation gate wiring passed"
 
@@ -430,6 +443,14 @@ render_infra_success \
   vault-runasuser-zero \
   --set bundledVault.podSecurityContext.runAsUser=0
 
+render_infra_success \
+  vault-runasgroup-zero \
+  --set bundledVault.podSecurityContext.runAsGroup=0
+
+render_infra_success \
+  vault-fsgroup-zero \
+  --set bundledVault.podSecurityContext.fsGroup=0
+
 # Chart-owned objects are closed: an unknown key is rejected instead of
 # being silently ignored.
 render_failure_matching \
@@ -502,8 +523,7 @@ render_osac_chart_offline offline-validation-placeholder \
 # or the gate would pass an install that fails only after install-infra
 # changed the cluster.
 echo "checking netbox-unseeded-bridge (no seed hook: the token error is real)"
-NETBOX_TOKEN_SEEDED=0
-if render_osac_chart_offline offline-validation-placeholder \
+if NETBOX_TOKEN_SEEDED=0 render_osac_chart_offline offline-validation-placeholder \
     osac "${OSAC_CHART_DIR}" --values "${OSAC_CHART_DIR}/ci/default-values.yaml" \
     "${NETBOX_PROFILE_ARGS[@]}" \
     2>"${netbox_gate_err}"; then
