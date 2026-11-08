@@ -658,8 +658,9 @@ render_failure_matching \
 # (helm template's lookup returns nil), so the raw render fails the
 # lookup-dependent branch. The gate bridges exactly that failure through
 # render_osac_chart_offline (scripts/lib.sh) with a render-only placeholder
-# (NETBOX_OFFLINE_PLACEHOLDER in the Makefile; it must match the value asserted
-# below) that is never passed to an installation -- and only when
+# (NETBOX_OFFLINE_PLACEHOLDER in the Makefile, generated at runtime there;
+# the plan assertion above matches only its prefix) that is never passed to
+# an installation -- and only when
 # netbox_seed_check first saw this install's infra values deploy the seed
 # hook. The hostname --sets mirror the OpenShift gate branch -- the
 # profile's supported platform; on Kind the install itself rejects the
@@ -681,6 +682,11 @@ render_failure_matching \
 # the tests below exercise the same code path the gate uses.
 source "${SCRIPT_DIR}/lib.sh"
 netbox_gate_err="${TMP_DIR}/netbox-gate.err"
+# The render-only placeholder mirrors the Makefile's runtime-generated
+# NETBOX_OFFLINE_PLACEHOLDER; only its prefix is asserted against the
+# gate's plan above, so the two values need not match. Generated here so
+# no token-shaped literal sits in the script.
+offline_token="offline-validation-placeholder-$(date +%s)-$$"
 
 # netbox_seed_check decides whether the bridge is legitimate at all: the
 # netbox profile's infra values deploy the seed hook, bmaas-ci's do not.
@@ -715,7 +721,7 @@ netbox_seed_check osac-infra "${INFRA_CHART_DIR}" \
   --values "${INSTALLER_DIR}/values/bmaas-ci/infra.yaml" \
   --values "${INSTALLER_DIR}/values/bmaas-netbox-ci/infra.yaml" \
   --set osacNamespace=osac
-render_osac_chart_offline offline-validation-placeholder \
+render_osac_chart_offline "${offline_token}" \
   osac "${OSAC_CHART_DIR}" --values "${OSAC_CHART_DIR}/ci/default-values.yaml" \
   --namespace osac \
   "${NETBOX_PROFILE_ARGS[@]}" \
@@ -727,7 +733,7 @@ render_osac_chart_offline offline-validation-placeholder \
 # install only after install-infra changed the cluster. The gate fails
 # instead, naming both identities.
 echo "checking netbox-key-mismatch (seeded key differs from the chart's key)"
-if render_osac_chart_offline offline-validation-placeholder \
+if render_osac_chart_offline "${offline_token}" \
     osac "${OSAC_CHART_DIR}" --values "${OSAC_CHART_DIR}/ci/default-values.yaml" \
     --namespace osac \
     "${NETBOX_PROFILE_ARGS[@]}" \
@@ -741,7 +747,7 @@ grep -Fq 'osac chart reads Secret netbox-api-token/api-token' "${netbox_gate_err
   || fail "netbox-key-mismatch: the failure did not name the divergent key"
 
 echo "checking netbox-name-mismatch (seeded name differs from the chart's name)"
-if render_osac_chart_offline offline-validation-placeholder \
+if render_osac_chart_offline "${offline_token}" \
     osac "${OSAC_CHART_DIR}" --values "${OSAC_CHART_DIR}/ci/default-values.yaml" \
     --namespace osac \
     "${NETBOX_PROFILE_ARGS[@]}" \
@@ -759,7 +765,7 @@ grep -Fq 'osac chart reads Secret other-token/' "${netbox_gate_err}" \
 # or the gate would pass an install that fails only after install-infra
 # changed the cluster.
 echo "checking netbox-unseeded-bridge (no seed hook: the token error is real)"
-if NETBOX_TOKEN_SEEDED=0 render_osac_chart_offline offline-validation-placeholder \
+if NETBOX_TOKEN_SEEDED=0 render_osac_chart_offline "${offline_token}" \
     osac "${OSAC_CHART_DIR}" --values "${OSAC_CHART_DIR}/ci/default-values.yaml" \
     "${NETBOX_PROFILE_ARGS[@]}" \
     2>"${netbox_gate_err}"; then
@@ -778,7 +784,7 @@ grep -Eiq 'netbox\.tokenValue is required when Secret' "${netbox_gate_err}" \
 # (what CI installs) prints "got number, want string".
 numeric_token_pattern='(bmf\.netbox\.tokenValue|/bmf/netbox/tokenValue).*(Invalid type|got number, want string)'
 echo "checking netbox-caller-numeric-token (expected failure naming the token type)"
-if render_osac_chart_offline offline-validation-placeholder \
+if render_osac_chart_offline "${offline_token}" \
     osac "${OSAC_CHART_DIR}" --values "${OSAC_CHART_DIR}/ci/default-values.yaml" \
     "${NETBOX_PROFILE_ARGS[@]}" \
     --set bmf.netbox.tokenValue=123 \
@@ -793,7 +799,7 @@ grep -Eiq "${numeric_token_pattern}" "${netbox_gate_err}" \
 # bridge must render the file's value itself.
 printf 'bmf:\n  netbox:\n    tokenValue: 123\n' >"${TMP_DIR}/netbox-numeric.yaml"
 echo "checking netbox-file-numeric-token (expected failure naming the token type)"
-if render_osac_chart_offline offline-validation-placeholder \
+if render_osac_chart_offline "${offline_token}" \
     osac "${OSAC_CHART_DIR}" --values "${OSAC_CHART_DIR}/ci/default-values.yaml" \
     "${NETBOX_PROFILE_ARGS[@]}" \
     -f "${TMP_DIR}/netbox-numeric.yaml" \
@@ -810,7 +816,7 @@ file_supplied_token="file-supplied-token-$(date +%s)-$$"
 printf 'bmf:\n  netbox:\n    tokenValue: %s\n' "${file_supplied_token}" \
   >"${TMP_DIR}/netbox-token.yaml"
 echo "checking netbox-file-string-token (expected success)"
-render_osac_chart_offline offline-validation-placeholder \
+render_osac_chart_offline "${offline_token}" \
   osac "${OSAC_CHART_DIR}" --values "${OSAC_CHART_DIR}/ci/default-values.yaml" \
   "${NETBOX_PROFILE_ARGS[@]}" \
   -f "${TMP_DIR}/netbox-token.yaml" \
@@ -948,17 +954,28 @@ grep -q 'nodes.txt: <redacted>' "${TMP_DIR}/dryrun-evpn-fabric-rendered.yaml" \
 
 # Container env entries are a plain-text channel for credentials: callers
 # can inject passwords into workload specs through values overlays (for
-# example keycloak.extraEnv) instead of Secret references, and Helm
-# renders them as `value:` lines in the Deployment. The dry run must mask
-# env values whose variable name is credential-shaped, while ordinary
-# configuration env values stay readable for review.
+# example keycloak.extraEnv) instead of Secret references. The chart
+# routes extraEnv values through the keycloak-extra-env Secret and
+# references them with secretKeyRef, so they never render as plain-text
+# env values -- whatever the variable is named -- and the redactor masks
+# them as a Secret payload. Env values elsewhere whose variable name is
+# credential-shaped are masked in place, while ordinary configuration
+# env values stay readable for review.
 echo "checking dry-run-env-redaction (overlay env passwords stay out)"
-env_token="env-token-$(date +%s)-$$"
+env_password="env-password-$(date +%s)-$$"
+env_session="env-session-$(date +%s)-$$"
+env_apikey="env-apikey-$(date +%s)-$$"
 cat >"${TMP_DIR}/dryrun-env-token.yaml" <<ENV_EOF
 keycloak:
   extraEnv:
-    - name: KC_SPI_DEMO_CREDENTIAL
-      value: ${env_token}
+    # Benignly named entries on purpose: the values must stay out of the
+    # dry-run output regardless of the variable name they travel under.
+    - name: KC_SPI_DEMO_URL
+      value: ${env_password}
+    - name: KC_SPI_DEMO_SESSION
+      value: ${env_session}
+    - name: KC_SPI_DEMO_CLIENT
+      value: ${env_apikey}
 ENV_EOF
 if ! helm template osac-infra "${INFRA_CHART_DIR}" \
     --namespace osac-infra \
@@ -968,26 +985,40 @@ if ! helm template osac-infra "${INFRA_CHART_DIR}" \
     >"${TMP_DIR}/dryrun-env-rendered.yaml" 2>>"${netbox_gate_err}"; then
   fail "dry-run-env-redaction: the osac-infra chart render failed"
 fi
-grep -Fq "${env_token}" "${TMP_DIR}/dryrun-env-rendered.yaml" \
-  && fail "dry-run-env-redaction: an overlay env password reached the dry-run output"
-grep -q 'KC_SPI_DEMO_CREDENTIAL' "${TMP_DIR}/dryrun-env-rendered.yaml" \
-  || fail "dry-run-env-redaction: the injected env entry is missing"
-grep -A1 '"\?KC_SPI_DEMO_CREDENTIAL"\?' "${TMP_DIR}/dryrun-env-rendered.yaml" \
-  | grep -q 'value: <redacted>' \
-  || fail "dry-run-env-redaction: the env value was not masked"
+for leaked in "${env_password}" "${env_session}" "${env_apikey}"; do
+  grep -Fq "${leaked}" "${TMP_DIR}/dryrun-env-rendered.yaml" \
+    && fail "dry-run-env-redaction: an overlay env value (${leaked}) reached the dry-run output"
+done
+# The env entries reference the Secret instead of carrying plain text.
+grep -q 'name: keycloak-extra-env' "${TMP_DIR}/dryrun-env-rendered.yaml" \
+  || fail "dry-run-env-redaction: the extra-env Secret is missing"
+for entry in KC_SPI_DEMO_URL KC_SPI_DEMO_SESSION KC_SPI_DEMO_CLIENT; do
+  grep -A2 "name: \"${entry}\"" "${TMP_DIR}/dryrun-env-rendered.yaml" \
+    | grep -q 'secretKeyRef' \
+    || fail "dry-run-env-redaction: ${entry} does not reference the extra-env Secret"
+  grep -q "${entry}: <redacted>" "${TMP_DIR}/dryrun-env-rendered.yaml" \
+    || fail "dry-run-env-redaction: the ${entry} payload was not masked"
+done
 grep -A1 'name: KC_SPI_IMPORT_REALM_FILE_STRATEGY' \
   "${TMP_DIR}/dryrun-env-rendered.yaml" \
   | grep -q 'value: OVERWRITE' \
   || fail "dry-run-env-redaction: a benign env value was masked"
 # Direct redactor check for the env rule, independent of the chart: a
 # credential-named entry is masked and a benignly named one is kept, in
-# the indentation Helm uses for container env lists.
+# the indentation Helm uses for container env lists. Covers well-known
+# credential names (access key IDs, registry auth config) beyond the
+# PASSWORD/SECRET/TOKEN family.
 printf '%s\n' 'kind: Deployment' 'spec:' '  template:' \
-  '    - name: APP_PASSWORD' "      value: ${env_token}-direct" \
+  '    - name: APP_PASSWORD' "      value: ${env_password}-direct" \
+  '    - name: AWS_ACCESS_KEY_ID' "      value: ${env_apikey}-aws" \
+  '    - name: DOCKER_AUTH_CONFIG' "      value: ${env_password}-docker" \
   '    - name: APP_MODE' '      value: foreground' \
   | "${SCRIPT_DIR}/redact-secret-values.sh" >"${TMP_DIR}/dryrun-env-direct.yaml"
-grep -Fq "${env_token}-direct" "${TMP_DIR}/dryrun-env-direct.yaml" \
-  && fail "dry-run-env-redaction: the redactor kept a credential env value"
+for leaked in "${env_password}-direct" "${env_apikey}-aws" \
+  "${env_password}-docker"; do
+  grep -Fq "${leaked}" "${TMP_DIR}/dryrun-env-direct.yaml" \
+    && fail "dry-run-env-redaction: the redactor kept a credential env value (${leaked})"
+done
 grep -q 'value: foreground' "${TMP_DIR}/dryrun-env-direct.yaml" \
   || fail "dry-run-env-redaction: the redactor masked a benign env value"
 

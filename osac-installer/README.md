@@ -193,8 +193,8 @@ dev-full host setup script. Since `helm template` does not connect to a cluster,
 no Kubernetes resources are changed. The generated manifests are printed to
 the terminal with Secret payload values (`data`/`stringData`, including
 multi-line block scalars such as PEM keys), container env entry values
-whose variable name is credential-shaped (for example a password passed
-through `keycloak.extraEnv` instead of a Secret reference), and the AAP
+whose variable name is credential-shaped (access keys, registry auth
+config, passwords, tokens), and the AAP
 instance-group endpoint config (the AAP instance-group ConfigMaps named
 `*-ig`, which carry EVPN/Netris controller URLs from values overlays, and
 the `osac-infra-evpn-config` ConfigMap, which carries internal node

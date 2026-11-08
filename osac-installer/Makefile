@@ -645,8 +645,11 @@ endif
 # seed hook; without it nothing creates the Secret, so a missing token is a
 # real input error. A token supplied by the caller through any channel
 # (--set, --set-string, or a values file) renders without the placeholder,
-# so the gate validates the caller's actual value.
-NETBOX_OFFLINE_PLACEHOLDER := offline-validation-placeholder
+# so the gate validates the caller's actual value. The placeholder is
+# generated at runtime so no token-shaped literal sits in the tree; every
+# invocation uses a fresh value, which also keeps the render-only token
+# distinct from anything a caller could supply.
+NETBOX_OFFLINE_PLACEHOLDER := offline-validation-placeholder-$(shell date +%s)
 
 .PHONY: validate-inputs
 # An OCI-ref install renders the pulled chart, so the local osac chart's

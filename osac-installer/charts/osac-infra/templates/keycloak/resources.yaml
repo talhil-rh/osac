@@ -162,6 +162,21 @@ stringData:
   admin-username: {{ .Values.keycloak.adminUsername | quote }}
   admin-password: {{ .Values.keycloak.adminPassword | quote }}
   default-user-password: {{ .Values.keycloak.defaultUserPassword | quote }}
+{{- if .Values.keycloak.extraEnv }}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: keycloak-extra-env
+  namespace: keycloak
+  labels:
+    {{- include "osac-infra.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+{{- range .Values.keycloak.extraEnv }}
+  {{ .name }}: {{ .value | quote }}
+{{- end }}
+{{- end }}
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
@@ -498,7 +513,10 @@ spec:
         {{- end }}
         {{- range .Values.keycloak.extraEnv }}
         - name: {{ .name | quote }}
-          value: {{ .value | quote }}
+          valueFrom:
+            secretKeyRef:
+              name: keycloak-extra-env
+              key: {{ .name | quote }}
         {{- end }}
         args:
         - start
