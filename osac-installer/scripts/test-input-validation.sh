@@ -51,9 +51,11 @@ write_stub() {
 }
 
 # Shared stub logger: append "name arg..." to MOCK_LOG with the value
-# after --set/--set-string redacted, so a secret-bearing override passed
-# through EXTRA_HELM_ARGS cannot land in the log. Assertions only match
-# command names and flag spellings, never the redacted values.
+# after every secret-bearing Helm override form (--set, --set-string,
+# --set-json, --set-literal, separated or equals-sign) redacted, so a
+# secret-bearing override passed through EXTRA_HELM_ARGS cannot land in
+# the log. Assertions only match command names and flag spellings, never
+# the redacted values.
 write_stub mock-log <<'STUB'
 #!/usr/bin/env bash
 set -eu
@@ -63,10 +65,10 @@ redacted=()
 prev=
 for arg in "$@"; do
   case "${prev}" in
-    --set|--set-string) arg='<redacted>' ;;
+    --set|--set-string|--set-json|--set-literal) arg='<redacted>' ;;
   esac
   case "${arg}" in
-    --set=*|--set-string=*) arg='--set=<redacted>' ;;
+    --set=*|--set-string=*|--set-json=*|--set-literal=*) arg='--set=<redacted>' ;;
   esac
   redacted+=("${arg}")
   prev=${arg}
@@ -490,6 +492,30 @@ MOCK_LOG="${LOG}" PATH="${STUB_BIN}:${PATH}" \
     || fail "remote-flag order: the gate rejected a valid EXTRA_HELM_ARGS override"
 grep -q 'helm template osac ' "${LOG}" \
   || fail "remote-flag order: the gate render never ran with the override"
+
+# Every secret-bearing Helm override form must stay out of the stub log
+# when the args are inherited through make's environment: a caller can
+# pass a password via --set-json or --set-literal (separated or
+# equals-sign form) just as easily as via --set.
+echo "checking stub-set-redaction (all override forms stay out of the log)"
+stub_secret="stub-secret-$(date +%s)-$$"
+: >"${LOG}"
+MOCK_LOG="${LOG}" PATH="${STUB_BIN}:${PATH}" \
+  REMOTE_KUBECONFIG="${LOG}" \
+  make -C "${SANDBOX}" --no-print-directory validate-inputs \
+    PLATFORM=openshift PROFILE=vmaas-ci NS=osac \
+    EXTRA_HELM_ARGS="--set-json global.example={\"pw\":\"${stub_secret}\"} --set-json=global.other={\"pw\":\"${stub_secret}\"} --set-literal bmf.netbox.tokenValue=${stub_secret} --set-literal=bmf.netbox.tokenValue=${stub_secret}" \
+    >"${TMP_DIR}/stub-set.out" 2>"${TMP_DIR}/stub-set.err" \
+    || fail "stub-set-redaction: the gate rejected a valid EXTRA_HELM_ARGS override"
+grep -Fq "${stub_secret}" "${LOG}" \
+  && fail "stub-set-redaction: a secret-bearing override reached the stub log"
+stub_eq_forms=$(grep -o -- '--set=<redacted>' "${LOG}" | wc -l)
+[ "${stub_eq_forms}" -ge 2 ] \
+  || fail "stub-set-redaction: an equals-sign form was not redacted (${stub_eq_forms}/2)"
+grep -q -- '--set-literal <redacted>' "${LOG}" \
+  || fail "stub-set-redaction: the separated --set-literal form was not redacted"
+grep -q -- '--set-json <redacted>' "${LOG}" \
+  || fail "stub-set-redaction: the separated --set-json form was not redacted"
 
 # The gate's osac-chart render goes through render_osac_chart_offline with
 # the render-only placeholder token: the function applies the placeholder
