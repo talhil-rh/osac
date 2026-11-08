@@ -8,12 +8,15 @@
 # carrying EVPN/Netris controller URLs and any credential misplaced there
 # instead of the parallel Secret) and the EVPN fabric config map
 # (`osac-infra-evpn-config`, carrying internal node hostnames and fabric
-# peer addresses); and container env entry values whose variable name is
+# peer addresses); container env entry values whose variable name is
 # credential-shaped (PASSWORD/SECRET/TOKEN/ACCESS_KEY/AUTH/...) or
 # endpoint-shaped (URL/HOST/ADDR/...), which callers can inject into
-# workload specs as plain text instead of Secret references. Resource
-# structure, Secret/ConfigMap names and keys, and every other value stay
-# readable so the dry run remains useful for review.
+# workload specs as plain text instead of Secret references; and the
+# registry host of image references that do not point at a well-known
+# public registry, since image overrides carry internal registry
+# hostnames. Resource structure, Secret/ConfigMap names and keys, and
+# every other value stay readable so the dry run remains useful for
+# review.
 set -euo pipefail
 
 # Helm renders each resource as a top-level document: kind and the data /
@@ -39,6 +42,27 @@ kind == "Secret" && /^(data|stringData):$/ { in_payload = 1; print; next }
 endpoint_configmap && /^data:$/ { in_payload = 1; print; next }
 /^[^ ]/ { in_payload = 0 }
 {
+    # Image references carry the registry hostname whenever callers override
+    # images through values, and an internal registry hostname is endpoint
+    # data. The registry host is the first path segment when it contains a
+    # dot or colon (or is localhost); well-known public registries stay
+    # readable so the common case remains reviewable.
+    if ($0 ~ /^[[:space:]]*image: /) {
+        match($0, /^[[:space:]]*image: */)
+        img_head = substr($0, 1, RLENGTH)
+        img_val = substr($0, RLENGTH + 1)
+        img_quote = ""
+        if (substr(img_val, 1, 1) == "\"") {
+            img_quote = "\""
+            img_val = substr(img_val, 2)
+        }
+        img_n = split(img_val, img_seg, "/")
+        if (img_n > 1 && (img_seg[1] ~ /[.:]/ || img_seg[1] == "localhost") \
+            && img_seg[1] !~ /^(quay\.io|docker\.io|ghcr\.io|gcr\.io|registry\.k8s\.io)$/) {
+            sub(/^[^\/]*\//, "", img_val)
+            $0 = img_head img_quote "<redacted>/" img_val
+        }
+    }
     if (env_await_value) {
         env_await_value = 0
         if ($0 ~ /^[[:space:]]+value: ./ && (tolower(env_name) ~ \

@@ -62,7 +62,10 @@ keycloak:
   # KC_SPI_CONNECTIONS_HTTP_CLIENT_DEFAULT_DISABLE_TRUST_MANAGER for Kind).
   # Values are stored in the keycloak-extra-env Secret and referenced from
   # the pod via secretKeyRef, so they never appear in the Deployment spec
-  # (and never reach `install-dry-run` output in plain text).
+  # (and never reach `install-dry-run` output in plain text). While extraEnv
+  # is in use, every upgrade rolls the Keycloak pod (Secret-backed env
+  # values are not refreshed in running containers, and a value checksum
+  # would leak guessable hashes).
   extraEnv: []
   oidcIdpTrust:
     # PEM-encoded CA bundle for outbound TLS to an external OIDC identity

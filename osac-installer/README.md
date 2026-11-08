@@ -195,7 +195,10 @@ the terminal with Secret payload values (`data`/`stringData`, including
 multi-line block scalars such as PEM keys), container env entry values
 whose variable name is credential-shaped (access keys, registry auth
 config, passwords, tokens) or endpoint-shaped (URLs, hosts, internal
-endpoints such as the dev-fixtures MCP resource URL), and the AAP
+endpoints such as the dev-fixtures MCP resource URL), the registry host
+of image references that do not point at a well-known public registry
+(image overrides carry internal registry hostnames; the repository and
+tag stay readable), and the AAP
 instance-group endpoint config (the AAP instance-group ConfigMaps named
 `*-ig`, which carry EVPN/Netris controller URLs from values overlays, and
 the `osac-infra-evpn-config` ConfigMap, which carries internal node

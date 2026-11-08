@@ -383,9 +383,11 @@ spec:
       annotations:
         # The extra env values are read from the keycloak-extra-env Secret,
         # and Kubernetes does not refresh Secret-backed env entries in a
-        # running container: the checksum rolls the pod when a value
-        # changes, restoring the inline-env upgrade behavior.
-        checksum/extra-env: {{ .Values.keycloak.extraEnv | toJson | sha256sum }}
+        # running container. A checksum of the values would let anyone who
+        # can read this Deployment (or the dry-run output) guess low-entropy
+        # values offline, so the pod rolls on every upgrade while extraEnv
+        # is in use instead: it reveals nothing and never misses a change.
+        rollout/extra-env: {{ .Release.Revision | quote }}
       {{- end }}
     spec:
       serviceAccountName: keycloak-service

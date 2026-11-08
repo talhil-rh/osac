@@ -1024,31 +1024,37 @@ grep -q 'value: foreground' "${TMP_DIR}/dryrun-env-direct.yaml" \
 
 # The extra-env values live in a Secret, and Kubernetes does not refresh
 # Secret-backed env entries in a running container, so the pod template
-# carries a checksum of extraEnv: changing a value must change the
-# checksum (rolling Keycloak), while an unchanged value must keep it
-# stable across renders.
-echo "checking keycloak-extra-env-checksum (value changes roll the pod)"
-extra_env_checksum() {
+# carries a rollout revision keyed to the Helm release revision while
+# extraEnv is in use: every upgrade rolls Keycloak, so a changed value
+# never lingers in a running pod. A checksum of the values would instead
+# publish a guessable hash of possibly low-entropy values, so the
+# annotation must not depend on the values at all.
+echo "checking keycloak-extra-env-rollout (extraEnv upgrades roll the pod)"
+extra_env_rollout() {
   helm template osac-infra "${INFRA_CHART_DIR}" \
     --namespace osac-infra \
     --values "${INSTALLER_DIR}/values/vmaas-ci/infra.yaml" \
     -f "$1" 2>/dev/null \
-    | grep 'checksum/extra-env'
+    | grep 'rollout/extra-env'
 }
-printf 'keycloak:\n  extraEnv:\n    - name: KC_SPI_DEMO_URL\n      value: checksum-first\n' \
-  >"${TMP_DIR}/checksum-a.yaml"
-printf 'keycloak:\n  extraEnv:\n    - name: KC_SPI_DEMO_URL\n      value: checksum-second\n' \
-  >"${TMP_DIR}/checksum-b.yaml"
-checksum_a=$(extra_env_checksum "${TMP_DIR}/checksum-a.yaml") \
-  || fail "keycloak-extra-env-checksum: the osac-infra chart render failed"
-[ -n "${checksum_a}" ] \
-  || fail "keycloak-extra-env-checksum: the pod template carries no extra-env checksum"
-checksum_b=$(extra_env_checksum "${TMP_DIR}/checksum-b.yaml")
-[ "${checksum_a}" != "${checksum_b}" ] \
-  || fail "keycloak-extra-env-checksum: a changed extraEnv value did not change the checksum"
-checksum_a2=$(extra_env_checksum "${TMP_DIR}/checksum-a.yaml")
-[ "${checksum_a}" = "${checksum_a2}" ] \
-  || fail "keycloak-extra-env-checksum: the checksum is not stable across renders"
+printf 'keycloak:\n  extraEnv:\n    - name: KC_SPI_DEMO_URL\n      value: rollout-first\n' \
+  >"${TMP_DIR}/rollout-a.yaml"
+printf 'keycloak:\n  extraEnv:\n    - name: KC_SPI_DEMO_URL\n      value: rollout-second\n' \
+  >"${TMP_DIR}/rollout-b.yaml"
+rollout_a=$(extra_env_rollout "${TMP_DIR}/rollout-a.yaml") \
+  || fail "keycloak-extra-env-rollout: the osac-infra chart render failed"
+grep -Eq 'rollout/extra-env: "[0-9]+"$' <<<"${rollout_a}" \
+  || fail "keycloak-extra-env-rollout: the rollout annotation is not release-revision keyed"
+rollout_b=$(extra_env_rollout "${TMP_DIR}/rollout-b.yaml")
+[ "${rollout_a}" = "${rollout_b}" ] \
+  || fail "keycloak-extra-env-rollout: the rollout annotation depends on the env values"
+grep -q 'sha256\|checksum' <<<"${rollout_a}" \
+  && fail "keycloak-extra-env-rollout: the rollout annotation exposes a value hash"
+helm template osac-infra "${INFRA_CHART_DIR}" \
+  --namespace osac-infra \
+  --values "${INSTALLER_DIR}/values/vmaas-ci/infra.yaml" 2>/dev/null \
+  | grep -q 'rollout/extra-env' \
+  && fail "keycloak-extra-env-rollout: the rollout annotation appears without extraEnv"
 
 # Internal endpoint URLs reach the dry run as plain env values too (for
 # example the dev-fixtures Job's MCP_RESOURCE_URL): endpoint-shaped env
@@ -1070,5 +1076,32 @@ grep -Fq "${mcp_host}" "${TMP_DIR}/dryrun-mcp-rendered.yaml" \
 grep -A1 'name: MCP_RESOURCE_URL' "${TMP_DIR}/dryrun-mcp-rendered.yaml" \
   | grep -q 'value: <redacted>' \
   || fail "dry-run-endpoint-env-redaction: the endpoint env value was not masked"
+
+# Image overrides carry the internal registry hostname into every image
+# reference the dry run prints. The registry host is masked unless it is
+# a well-known public registry, so the repository and tag stay readable
+# for review.
+echo "checking dry-run-image-registry-redaction (internal registry hosts stay out)"
+reg_host="registry-internal-$(date +%s)-$$.internal.example.com"
+printf 'cliImage: %s/openshift/origin-cli:4.22\nkeycloak:\n  images:\n    keycloak: %s/keycloak/keycloak:26.6.4\n' \
+  "${reg_host}" "${reg_host}" >"${TMP_DIR}/dryrun-registry.yaml"
+if ! helm template osac-infra "${INFRA_CHART_DIR}" \
+    --namespace osac-infra \
+    --values "${INSTALLER_DIR}/values/vmaas-ci/infra.yaml" \
+    -f "${TMP_DIR}/dryrun-registry.yaml" \
+    | "${SCRIPT_DIR}/redact-secret-values.sh" \
+    >"${TMP_DIR}/dryrun-registry-rendered.yaml" 2>>"${netbox_gate_err}"; then
+  fail "dry-run-image-registry-redaction: the osac-infra chart render failed"
+fi
+grep -Fq "${reg_host}" "${TMP_DIR}/dryrun-registry-rendered.yaml" \
+  && fail "dry-run-image-registry-redaction: an internal registry hostname reached the dry-run output"
+grep -q 'image: <redacted>/keycloak/keycloak:26.6.4' "${TMP_DIR}/dryrun-registry-rendered.yaml" \
+  || fail "dry-run-image-registry-redaction: the overridden image repository was not kept readable"
+grep -q 'image: <redacted>/openshift/origin-cli:4.22' "${TMP_DIR}/dryrun-registry-rendered.yaml" \
+  || fail "dry-run-image-registry-redaction: the overridden cli image repository was not kept readable"
+grep -q 'image: quay.io/sclorg' "${TMP_DIR}/dryrun-registry-rendered.yaml" \
+  || fail "dry-run-image-registry-redaction: a public registry image was masked"
+grep -q 'image: ghcr.io/openbao' "${TMP_DIR}/dryrun-registry-rendered.yaml" \
+  || fail "dry-run-image-registry-redaction: a public registry image was masked"
 
 echo "input validation passed"
