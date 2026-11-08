@@ -379,6 +379,26 @@ grep -q 'NS must be a lowercase DNS label' "${TMP_DIR}/nsmake.err" \
   || fail "ns-injection-make: the failure did not name the namespace rule"
 assert_prevalidation_commands ns-injection-make
 
+# The NS freeze sits outside the parse-time MAKECMDGOALS gate: make
+# auto-exports command-line variables by expanding them, so a goal the
+# gate does not cover (install-dry-run) would otherwise run a Make
+# expression in an unvalidated NS at recipe-launch time. The sentinel
+# proves the expression never executed and the gate rejected the raw
+# value instead, before any render ran.
+echo "checking ns-injection-ungated (goals outside the parse-time gate)"
+: >"${LOG}"
+if MOCK_LOG="${LOG}" PATH="${STUB_BIN}:${PATH}" \
+  make -C "${SANDBOX}" --no-print-directory install-dry-run \
+  PLATFORM=kind PROFILE=dev "NS=osac\$(shell touch ${ns_sentinel}-ungated)" \
+  >"${TMP_DIR}/nsung.out" 2>"${TMP_DIR}/nsung.err"; then
+  fail "ns-injection-ungated: the gate accepted a Make-expression-bearing NS"
+fi
+[ ! -e "${ns_sentinel}-ungated" ] \
+  || fail "ns-injection-ungated: a Make expression in NS executed"
+grep -q 'NS must be a lowercase DNS label' "${TMP_DIR}/nsung.err" \
+  || fail "ns-injection-ungated: the failure did not name the namespace rule"
+assert_prevalidation_commands ns-injection-ungated
+
 # Caller-supplied Helm args are data, never command text: EXTRA_HELM_ARGS
 # is frozen verbatim (no Make expression in it expands, including at
 # export time) and reaches recipes through the environment, so both Make

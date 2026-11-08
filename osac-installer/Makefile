@@ -67,6 +67,20 @@ REMOTE_KUBECONFIG_SECRET_KEY ?= kubeconfig
 override REMOTE_KUBECONFIG_SECRET_NAME := $(value REMOTE_KUBECONFIG_SECRET_NAME)
 override REMOTE_KUBECONFIG_SECRET_KEY := $(value REMOTE_KUBECONFIG_SECRET_KEY)
 export REMOTE_KUBECONFIG_SECRET_NAME REMOTE_KUBECONFIG_SECRET_KEY
+# NS is validated through the exported environment -- never through Make
+# expansion into command text -- so a value carrying shell metacharacters
+# cannot execute. Freezing the value verbatim (like the identifiers above)
+# also keeps Make expressions such as $(shell ...) from running at
+# expansion time, before validation can reject the value. Every target
+# that interpolates NS validates it first through the validate-ns
+# prerequisite (the gate reuses it), so a value that reaches any recipe
+# text is namespace-safe. The freeze sits outside the MAKECMDGOALS gate
+# above because make auto-exports command-line variables by expanding
+# them: a goal the gate does not cover (install-dry-run,
+# prepare-remote-cluster, validate-ns itself) would otherwise run the
+# expressions in an unvalidated NS at recipe-launch time.
+override NS := $(value NS)
+export NS
 
 # Remote-cluster kubeconfig Helm flags, shared by the input-validation gate's
 # osac-chart render and install-osac's upgrade so both see the same merged
@@ -109,15 +123,6 @@ endif
 ifndef NS
 $(error NS is required (namespace for OSAC instance, e.g. NS=osac))
 endif
-# NS is validated by the input-validation gate through the exported
-# environment -- never through Make expansion into command text -- so a
-# value carrying shell metacharacters cannot execute. Freezing the value
-# verbatim (like INFRA_VALUES_EXTRA below) also keeps Make expressions
-# such as $(shell ...) from running at expansion time, before the gate
-# can reject the value; once it passes, every later $(NS) interpolation
-# in recipe text is namespace-safe.
-override NS := $(value NS)
-export NS
 ifeq ($(PLATFORM),kind)
 ifeq ($(filter $(PROFILE),dev dev-full),)
 $(error PLATFORM=kind only supports PROFILE=dev or PROFILE=dev-full)
@@ -437,7 +442,7 @@ help: ## Display this help
 ##@ Entity: Local Kind Images
 
 .PHONY: kind-load-images
-kind-load-images: ## Load previously built dev-full images into Kind (PLATFORM=kind PROFILE=dev-full NS= required)
+kind-load-images: validate-ns ## Load previously built dev-full images into Kind (PLATFORM=kind PROFILE=dev-full NS= required)
 	@if [ "$(PLATFORM)/$(PROFILE)" != "kind/dev-full" ]; then \
 		echo "ERROR: kind-load-images requires PLATFORM=kind PROFILE=dev-full" >&2; exit 1; \
 	fi
@@ -592,7 +597,7 @@ else
 endif
 
 .PHONY: uninstall-infra
-uninstall-infra: ## Uninstall infrastructure (PLATFORM= PROFILE= NS= required)
+uninstall-infra: validate-ns ## Uninstall infrastructure (PLATFORM= PROFILE= NS= required)
 ifeq ($(PLATFORM),kind)
 ifeq ($(HOST_IS_MAC_ARM),true)
 	@$(KIND_RUNTIME_CMD) delete-cluster $(KIND_CLUSTER_NAME)
@@ -674,13 +679,17 @@ ifeq ($(PROFILE),dev-full)
 validate-inputs: helm-devstack-deps
 endif
 endif
-# The namespace is interpolated into later recipe command text, so the
-# gate proves it is a valid DNS label before anything else: like the
-# remote-cluster identifiers below, the value reaches the validator
-# through the exported environment, never through Make expansion into
-# the quoted bash -c string.
+# The namespace is interpolated into later recipe command text, so every
+# target that interpolates it proves it is a valid DNS label first
+# through the validate-ns prerequisite; the gate reuses the same check.
+# Like the remote-cluster identifiers below, the value reaches the
+# validator through the exported environment, never through Make
+# expansion into the quoted bash -c string.
+.PHONY: validate-ns
+validate-ns:
 	@bash -c 'source scripts/lib.sh && validate_namespace "$${NS:?NS is required}"' \
 	|| { echo "ERROR: invalid NS; no cluster changes were made. NS must be a lowercase DNS label (a-z, 0-9, '-', at most 63 characters)." >&2; exit 1; }
+validate-inputs: validate-ns
 # Remote-cluster identifiers are static inputs: the gate rejects an invalid
 # REMOTE_KUBECONFIG_SECRET_NAME/KEY before any cluster mutation. install-osac
 # re-checks them, but only after install-infra and namespace creation have
@@ -830,7 +839,7 @@ endif
 		$${EXTRA_HELM_ARGS} $(OSAC_HELM_FORCE_CONFLICTS) $(REMOTE_CLUSTER_HELM_ARGS) \
 		--wait --timeout 40m
 .PHONY: uninstall-osac
-uninstall-osac: ## Uninstall OSAC instance (PLATFORM= PROFILE= NS= required)
+uninstall-osac: validate-ns ## Uninstall OSAC instance (PLATFORM= PROFILE= NS= required)
 	helm uninstall osac --namespace $(NS) --ignore-not-found
 
 ##@ Entity: Dev Stack (kind PROFILE=dev-full only)
@@ -881,7 +890,7 @@ install: validate-osac-inputs install-infra install-osac ## Full install: infra 
 endif
 
 .PHONY: install-dry-run
-install-dry-run: helm-deps validate-osac-chart-oci-ref ## Render every release in make install without connecting to a cluster
+install-dry-run: validate-ns helm-deps validate-osac-chart-oci-ref ## Render every release in make install without connecting to a cluster
 ifeq ($(PLATFORM),kind)
 	@helm template cert-manager oci://quay.io/jetstack/charts/cert-manager \
 		--version v1.20.0 --namespace cert-manager \
@@ -967,7 +976,7 @@ install-multicluster: validate-inputs ## Prepare a VMaaS workload cluster, then 
 		EXTRA_HELM_ARGS="$${EXTRA_HELM_ARGS}"
 
 .PHONY: prepare-remote-cluster
-prepare-remote-cluster: helm-infra-deps ## Prepare the remote VMaaS workload cluster without changing management
+prepare-remote-cluster: validate-ns helm-infra-deps ## Prepare the remote VMaaS workload cluster without changing management
 	@test -r "$(REMOTE_KUBECONFIG)" || { echo "ERROR: REMOTE_KUBECONFIG is not readable: $(REMOTE_KUBECONFIG)" >&2; exit 1; }
 	@oc --kubeconfig "$(REMOTE_KUBECONFIG)" get clusterversion version >/dev/null
 	REMOTE_KUBECONFIG="$(REMOTE_KUBECONFIG)" \
@@ -989,7 +998,7 @@ METERING_IT_IMAGE := localhost/metering-service:it
 METERING_IT_IMAGE_ARGS := --set metering.image.repository=localhost/metering-service --set metering.image.tag=it --set metering.image.pullPolicy=Never
 
 .PHONY: test
-test: ## Run integration tests (SUITE= required: all|fulfillment|compute-storage|operator|bmf)
+test: validate-ns ## Run integration tests (SUITE= required: all|fulfillment|compute-storage|operator|bmf)
 ifeq ($(SUITE),all)
 	$(MAKE) test SUITE=fulfillment
 	$(MAKE) test SUITE=operator
