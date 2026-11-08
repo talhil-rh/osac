@@ -696,9 +696,19 @@ for field in runAsUser runAsGroup fsGroup; do
     --set "bundledVault.podSecurityContext.${field}=-1"
 done
 
-render_infra_success \
-  vault-runasuser-zero \
+# runAsUser 0 with the default runAsNonRoot true only fails at
+# provisioning -- the kubelet refuses to start a root container flagged
+# non-root -- so the schema rejects the combination up front. UID 0
+# stays allowed when runAsNonRoot is explicitly false.
+render_infra_failure_matching \
+  vault-runasuser-zero-nonroot \
+  '(bundledVault\.podSecurityContext|/bundledVault/podSecurityContext).*(not validate|runAsNonRoot)' \
   --set bundledVault.podSecurityContext.runAsUser=0
+
+render_infra_success \
+  vault-runasuser-zero-root \
+  --set bundledVault.podSecurityContext.runAsUser=0 \
+  --set bundledVault.podSecurityContext.runAsNonRoot=false
 
 render_infra_success \
   vault-runasgroup-zero \
@@ -1268,6 +1278,23 @@ grep -Fq 'value: <redacted>' "${TMP_DIR}/dryrun-env-block.yaml" \
 grep -q 'value: foreground' "${TMP_DIR}/dryrun-env-block.yaml" \
   || fail "dry-run-env-block-redaction: output did not resume after the block"
 
+# Helm renders template comments inside env lists, so a comment line can
+# sit between an env entry's name and value lines; the one-line lookahead
+# for the value must skip it instead of ending the check.
+echo "checking dry-run-env-comment-redaction (values after env-list comments stay out)"
+printf '%s\n' 'kind: Deployment' 'spec:' '  template:' \
+  '    - name: APP_PASSWORD' '      # helm renders comments in env lists' \
+  "      value: ${env_password}-commented" \
+  '    - name: APP_MODE' '      value: foreground' \
+  | "${SCRIPT_DIR}/redact-secret-values.sh" >"${TMP_DIR}/dryrun-env-comment.yaml"
+grep -Fq "${env_password}-commented" "${TMP_DIR}/dryrun-env-comment.yaml" \
+  && fail "dry-run-env-comment-redaction: a value after a comment was kept"
+grep -Fq '# helm renders comments in env lists' \
+  "${TMP_DIR}/dryrun-env-comment.yaml" \
+  || fail "dry-run-env-comment-redaction: the comment was dropped"
+grep -q 'value: foreground' "${TMP_DIR}/dryrun-env-comment.yaml" \
+  || fail "dry-run-env-comment-redaction: output did not resume after the comment"
+
 # RBAC rules that target Secrets name the Secret in resourceNames, and the
 # name is customer-supplied (netbox.apiTokenSecret carries internal
 # hostnames): Secret-scoped resourceNames are masked in both list forms,
@@ -1309,14 +1336,16 @@ grep -Fq 'netbox.internal.example.com' "${TMP_DIR}/dryrun-role-render.yaml" \
 
 # Certificate dnsNames and commonName, Route hosts, and Gateway API route
 # hostnames carry the caller-supplied keycloak route hostname and cluster
-# domain, so entries that are not cluster-internal names are masked; bare
-# service names and service.namespace pairs stay readable so the SAN sets
-# and routes remain reviewable. Helm renders template comments inside
-# these lists, so the list reader must skip them without ending the list.
-echo "checking dry-run-hostname-redaction (caller hostnames stay out)"
+# domain, and caller-supplied internal hostnames cannot be told apart
+# from chart-internal ones by shape, so every entry is masked -- including
+# two-label service.namespace names and .svc/.cluster.local names. Helm
+# renders template comments inside these lists, so the list reader must
+# skip them without ending the list.
+echo "checking dry-run-hostname-redaction (certificate and route hostnames stay out)"
 printf '%s\n' 'kind: Certificate' 'spec:' \
   '  commonName: keycloak-keycloak.apps.internal.example.com' \
   '  dnsNames:' '  - keycloak' '  - openbao.c3i' \
+  '  - keycloak.keycloak.svc.cluster.local' \
   '  - keycloak-keycloak.apps.internal.example.com' \
   'kind: Certificate' 'spec:' \
   '  dnsNames: [osac-kafka.osac-kafka.svc, mgt.hub.internal.example.com]' \
@@ -1327,23 +1356,20 @@ printf '%s\n' 'kind: Certificate' 'spec:' \
   '    - keycloak-keycloak.apps.internal.example.com' \
   '  rules: []' \
   | "${SCRIPT_DIR}/redact-secret-values.sh" >"${TMP_DIR}/dryrun-hostnames.yaml"
-grep -Fq 'keycloak-keycloak.apps.internal.example.com' \
-  "${TMP_DIR}/dryrun-hostnames.yaml" \
-  && fail "dry-run-hostname-redaction: a caller hostname was kept"
-grep -Fq 'mgt.hub.internal.example.com' "${TMP_DIR}/dryrun-hostnames.yaml" \
-  && fail "dry-run-hostname-redaction: a flow-list caller hostname was kept"
+for leaked in 'keycloak-keycloak.apps.internal.example.com' \
+  'mgt.hub.internal.example.com' 'openbao.c3i' \
+  'keycloak.keycloak.svc.cluster.local' 'osac-kafka.osac-kafka.svc'; do
+  grep -Fq "${leaked}" "${TMP_DIR}/dryrun-hostnames.yaml" \
+    && fail "dry-run-hostname-redaction: a hostname was kept (${leaked})"
+done
 grep -Fq 'commonName: <redacted>' "${TMP_DIR}/dryrun-hostnames.yaml" \
   || fail "dry-run-hostname-redaction: the commonName was not masked"
 grep -Fq 'host: <redacted>' "${TMP_DIR}/dryrun-hostnames.yaml" \
   || fail "dry-run-hostname-redaction: the Route host was not masked"
-grep -Fq '    - <redacted>' "${TMP_DIR}/dryrun-hostnames.yaml" \
-  || fail "dry-run-hostname-redaction: a list entry was not masked"
-grep -Fq '  - keycloak' "${TMP_DIR}/dryrun-hostnames.yaml" \
-  || fail "dry-run-hostname-redaction: a bare service name was masked"
-grep -Fq '  - openbao.c3i' "${TMP_DIR}/dryrun-hostnames.yaml" \
-  || fail "dry-run-hostname-redaction: a service.namespace name was masked"
-grep -Fq 'osac-kafka.osac-kafka.svc' "${TMP_DIR}/dryrun-hostnames.yaml" \
-  || fail "dry-run-hostname-redaction: a flow-list service name was masked"
+grep -Fq 'dnsNames: [<redacted>, <redacted>]' "${TMP_DIR}/dryrun-hostnames.yaml" \
+  || fail "dry-run-hostname-redaction: a flow-list entry was not masked"
+grep -Fq '  - <redacted>' "${TMP_DIR}/dryrun-hostnames.yaml" \
+  || fail "dry-run-hostname-redaction: a block-list entry was not masked"
 grep -Fq '# comment inside the list' "${TMP_DIR}/dryrun-hostnames.yaml" \
   || fail "dry-run-hostname-redaction: a list comment was dropped"
 
@@ -1366,9 +1392,14 @@ fi
 grep -Fq 'keycloak-keycloak.apps.internal.example.com' \
   "${TMP_DIR}/dryrun-hostnames-render.yaml" \
   && fail "dry-run-hostname-render-redaction: the keycloak route hostname reached the dry run"
-grep -Fq 'keycloak.keycloak.svc.cluster.local' \
+# The SAN entries are dash-list lines; chart-fixed service names inside
+# ConfigMap data payloads (openbao api_addr, the CoreDNS rewrite rules)
+# are not hostname fields and stay readable.
+grep -Fq '  - keycloak.keycloak.svc.cluster.local' \
   "${TMP_DIR}/dryrun-hostnames-render.yaml" \
-  || fail "dry-run-hostname-render-redaction: a fixed SAN entry was masked"
+  && fail "dry-run-hostname-render-redaction: a .svc.cluster.local SAN entry reached the dry run"
+grep -Fq '  - <redacted>' "${TMP_DIR}/dryrun-hostnames-render.yaml" \
+  || fail "dry-run-hostname-render-redaction: no SAN entry was rendered masked"
 
 # The extra-env values live in a Secret, and Kubernetes does not refresh
 # Secret-backed env entries in a running container, so the pod template

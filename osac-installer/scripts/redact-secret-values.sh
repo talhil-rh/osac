@@ -23,10 +23,12 @@
 # netbox.apiTokenSecret is customer-supplied and carries the same
 # internal-identifier risk, so only Secret-scoped rules are masked and
 # other resourceNames stay readable. The dnsNames and commonName of
-# rendered Certificates and the host of Routes, when they are not
-# cluster-internal names (bare service names, localhost, or
-# .svc/.cluster.local-suffixed), since the keycloak route hostname and
-# the cluster domain are customer-supplied. Block-scalar bodies of
+# rendered Certificates, the host of Routes, and the hostnames of
+# Gateway API routes and Gateways -- in full, including two-label
+# service.namespace names and .svc/.cluster.local-suffixed names,
+# because caller-supplied internal hostnames cannot be told apart from
+# chart-internal ones by shape, and the keycloak route hostname and
+# cluster domain land in the same fields. Block-scalar bodies of
 # masked env values are dropped with their value line. Resource
 # structure, Secret/ConfigMap names and keys, and every other value
 # stay readable so the dry run remains useful for review.
@@ -46,22 +48,9 @@ set -euo pipefail
 # the block. RBAC rules list their target resources before resourceNames,
 # so the Secret-scope check reads the sibling resources list.
 awk '
-# A hostname in a Certificate or Route field stays readable when it is
-# cluster-internal: a bare service name, a service.namespace pair, a
-# name suffixed with .svc or .cluster.local, or localhost, with an
-# optional wildcard. Anything else carries a caller-supplied domain and
-# is masked.
-function host_is_readable(h) {
-    sub(/^\*\./, "", h)
-    if (h == "localhost") return 1
-    if (index(h, ".") == 0) return 1
-    if (h ~ /\.svc(\.cluster\.local)?$/ || h ~ /\.cluster\.local$/) return 1
-    if (split(h, host_lbl, ".") == 2) return 1
-    return 0
-}
-# Masks the non-readable entries of a flow-style hostname list on the
-# given line, keeping the key and the readable entries intact.
-function mask_flow_list(line,    head, body, n, i, item, out) {
+# Masks every entry of a flow-style hostname list on the given line,
+# keeping the key and the list shape intact.
+function mask_flow_list(line,    head, body, n, i, out) {
     head = line
     sub(/\[.*/, "", head)
     body = line
@@ -70,12 +59,8 @@ function mask_flow_list(line,    head, body, n, i, item, out) {
     n = split(body, host_arr, ",")
     out = "["
     for (i = 1; i <= n; i++) {
-        item = host_arr[i]
-        gsub(/^[[:space:]]+|[[:space:]]+$/, "", item)
-        gsub(/"/, "", item)
         if (i > 1) out = out ", "
-        if (host_is_readable(item)) out = out item
-        else out = out "<redacted>"
+        out = out "<redacted>"
     }
     return head out "]"
 }
@@ -126,20 +111,17 @@ endpoint_configmap && /^data:$/ { in_payload = 1; print; next }
             role_rn_block = 0
         }
     }
-    # Block-form Certificate dnsNames and HTTPRoute/Gateway hostnames
-    # lists carry their entries at the same indent as their key; the list
-    # ends at the first line at that indent that is not an entry. Entries
-    # that are not cluster-internal names are masked in place.
+    # Block-form Certificate dnsNames and route/Gateway hostnames lists
+    # carry their entries at the same indent as their key; the list ends
+    # at the first line at that indent that is not an entry. Every entry
+    # is masked in place.
     if (dns_block) {
         # Helm renders template comments inside these lists; they must not
         # end the block and carry nothing to mask.
         if ($0 ~ /^ *#/ || $0 ~ /^ *$/) { print; next }
         match($0, /^ */)
         if (RLENGTH >= dns_block_indent && $0 ~ /^ *- /) {
-            dns_entry = $0
-            sub(/^ *- /, "", dns_entry)
-            gsub(/"/, "", dns_entry)
-            if (!host_is_readable(dns_entry)) sub(/- .*/, "- <redacted>")
+            sub(/- .*/, "- <redacted>")
         } else {
             dns_block = 0
         }
@@ -166,6 +148,10 @@ endpoint_configmap && /^data:$/ { in_payload = 1; print; next }
         }
     }
     if (env_await_value) {
+        # Helm renders template comments inside env lists too, so a
+        # comment (or blank) line between the name and value lines must
+        # not end the one-line lookahead for the value line.
+        if ($0 ~ /^ *#/ || $0 ~ /^ *$/) { print; next }
         env_await_value = 0
         if ($0 ~ /^[[:space:]]+value: ./ && (tolower(env_name) ~ \
             /(password|passwd|passphrase|secret|token|credential|api_key|private_key|access_key|auth|session)/ \
@@ -224,16 +210,13 @@ endpoint_configmap && /^data:$/ { in_payload = 1; print; next }
         }
     }
     # Certificate commonName and dnsNames entries, Route hosts, and the
-    # hostnames of Gateway API routes and Gateways carry the
-    # caller-supplied keycloak route hostname and cluster domain; the
-    # fixed service names stay readable so the SAN sets and routes remain
-    # reviewable. Both list forms are covered: the flow list on the key
-    # line and the block list whose entries follow at the same indent.
+    # hostnames of Gateway API routes and Gateways all carry hostnames,
+    # and caller-supplied internal hostnames cannot be told apart from
+    # chart-internal ones by shape, so every value in these fields is
+    # masked. Both list forms are covered: the flow list on the key line
+    # and the block list whose entries follow at the same indent.
     if (kind == "Certificate" && $0 ~ /^[[:space:]]+commonName: /) {
-        cn_val = $0
-        sub(/^[[:space:]]*commonName: */, "", cn_val)
-        gsub(/"/, "", cn_val)
-        if (!host_is_readable(cn_val)) sub(/commonName: .*/, "commonName: <redacted>")
+        sub(/commonName: .*/, "commonName: <redacted>")
     }
     if (kind == "Certificate" && $0 ~ /^[[:space:]]+dnsNames: \[/) {
         $0 = mask_flow_list($0)
@@ -254,10 +237,7 @@ endpoint_configmap && /^data:$/ { in_payload = 1; print; next }
         dns_block = 1
     }
     if (kind == "Route" && $0 ~ /^[[:space:]]+host: /) {
-        route_host = $0
-        sub(/^[[:space:]]*host: */, "", route_host)
-        gsub(/"/, "", route_host)
-        if (!host_is_readable(route_host)) sub(/host: .*/, "host: <redacted>")
+        sub(/host: .*/, "host: <redacted>")
     }
     if (in_payload) {
         # Block-scalar body lines (indent deeper than the entry keys) are
