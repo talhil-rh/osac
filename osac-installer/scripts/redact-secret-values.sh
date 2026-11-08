@@ -66,28 +66,40 @@ function mask_flow_list(line,    head, body, n, i, out) {
     }
     return head out "]"
 }
-/^---$/ { kind = ""; endpoint_configmap = 0; in_payload = 0; env_block = 0; role_secret_rule = 0; role_res_block = 0; role_rn_block = 0; dns_block = 0; print; next }
-/^kind: / { kind = $2; print; next }
-!in_payload && /^  name: / {
-    if (kind == "ConfigMap" \
-        && ($2 ~ /-ig$/ || $2 == "osac-infra-evpn-config" \
-            || $2 == "osac-infra-mce-image-overrides" \
-            || $2 == "osac-infra-mce-config")) {
-        endpoint_configmap = 1
+function flush_document(    index_line, metadata, name) {
+    kind = ""; endpoint_configmap = 0; in_payload = 0; env_block = 0
+    env_await_value = 0; role_secret_rule = 0; role_res_block = 0
+    role_rn_block = 0; dns_block = 0
+    for (index_line = 1; index_line <= document_length; index_line++) {
+        $0 = document[index_line]
+        if (/^kind: /) kind = $2
+        if (/^[^ ]/) metadata = /^metadata:/
+        if (metadata && /^  name: /) name = $2
     }
-    print; next
+    gsub(/["\047]/, "", name)
+    endpoint_configmap = kind == "ConfigMap" \
+        && (name ~ /-ig$/ || name == "osac-infra-evpn-config" \
+            || name == "osac-infra-mce-image-overrides" \
+            || name == "osac-infra-mce-config")
+    for (index_line = 1; index_line <= document_length; index_line++) {
+        redact_line(document[index_line])
+        delete document[index_line]
+    }
+    document_length = 0
 }
-kind == "Secret" && /^(data|stringData):$/ { in_payload = 1; print; next }
-endpoint_configmap && /^data:$/ { in_payload = 1; print; next }
-/^[^ ]/ { in_payload = 0 }
-{
+function redact_line(line) {
+    $0 = line
+    if (/^kind: /) { kind = $2; print; return }
+    if (kind == "Secret" && /^(data|stringData):$/) { in_payload = 1; print; return }
+    if (endpoint_configmap && /^data:$/) { in_payload = 1; print; return }
+    if (/^[^ ]/) in_payload = 0
     # A masked block-scalar env value: its body lines are deeper-indented
     # than the value line itself and are dropped; a blank line inside the
     # block is dropped too. The first line at or shallower than the value
     # line indent ends the block and is processed normally.
     if (env_block) {
         match($0, /^ */)
-        if ($0 ~ /^ *$/ || RLENGTH > env_block_indent) next
+        if ($0 ~ /^ *$/ || RLENGTH > env_block_indent) return
         env_block = 0
     }
     # Block-form RBAC lists carry their entries on the following lines, at
@@ -120,7 +132,7 @@ endpoint_configmap && /^data:$/ { in_payload = 1; print; next }
     if (dns_block) {
         # Helm renders template comments inside these lists; they must not
         # end the block and carry nothing to mask.
-        if ($0 ~ /^ *#/ || $0 ~ /^ *$/) { print; next }
+        if ($0 ~ /^ *#/ || $0 ~ /^ *$/) { print; return }
         match($0, /^ */)
         if (RLENGTH >= dns_block_indent && $0 ~ /^ *- /) {
             sub(/- .*/, "- <redacted>")
@@ -153,7 +165,7 @@ endpoint_configmap && /^data:$/ { in_payload = 1; print; next }
         # Helm renders template comments inside env lists too, so a
         # comment (or blank) line between the name and value lines must
         # not end the one-line lookahead for the value line.
-        if ($0 ~ /^ *#/ || $0 ~ /^ *$/) { print; next }
+        if ($0 ~ /^ *#/ || $0 ~ /^ *$/) { print; return }
         env_await_value = 0
         if ($0 ~ /^[[:space:]]+value: ./ && (tolower(env_name) ~ \
             /(password|passwd|passphrase|secret|token|credential|api_key|private_key|access_key|auth|session|dsn|conn(ection)?_?str)/ \
@@ -245,9 +257,12 @@ endpoint_configmap && /^data:$/ { in_payload = 1; print; next }
     if (in_payload) {
         # Block-scalar body lines (indent deeper than the entry keys) are
         # dropped outright; single-line entry values are masked in place.
-        if ($0 ~ /^   +[^ ]/) next
+        if ($0 ~ /^   +[^ ]/) return
         if ($0 ~ /^  [^ :][^:]*: ./) sub(/: .*/, ": <redacted>")
     }
     print
 }
+/^---[[:space:]]*$/ { flush_document(); print "---"; next }
+{ document[++document_length] = $0 }
+END { flush_document() }
 '

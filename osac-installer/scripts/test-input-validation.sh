@@ -23,6 +23,8 @@ HELM_BIN=${HELM_BIN:-helm}
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "${TMP_DIR}"' EXIT
 
+python3 "${SCRIPT_DIR}/test-input-redaction.py"
+
 # Print an error to stderr and abort the suite with a non-zero status.
 fail() {
   echo "ERROR: $*" >&2
@@ -742,7 +744,7 @@ render_failure_matching() {
   local name=$1 pattern=$2
   shift 2
   local error="${TMP_DIR}/${name}.stderr"
-  echo "checking ${name} (expected failure matching ${pattern@Q})"
+  echo "checking ${name} (expected failure matching '${pattern}')"
   if "${HELM_BIN}" "${COMMON_ARGS[@]}" "$@" >/dev/null 2>"${error}"; then
     echo "ERROR: ${name} unexpectedly rendered successfully" >&2
     exit 1
@@ -760,7 +762,7 @@ render_infra_failure_matching() {
   local name=$1 pattern=$2
   shift 2
   local error="${TMP_DIR}/${name}.stderr"
-  echo "checking ${name} (expected failure matching ${pattern@Q})"
+  echo "checking ${name} (expected failure matching '${pattern}')"
   if "${HELM_BIN}" "${INFRA_ARGS[@]}" "$@" >/dev/null 2>"${error}"; then
     echo "ERROR: ${name} unexpectedly rendered successfully" >&2
     exit 1
@@ -1413,17 +1415,20 @@ grep -q 'value: foreground' "${TMP_DIR}/dryrun-env-comment.yaml" \
 # name and DSN/connection-string names often carry raw key material or
 # an embedded password, so they are masked like the keyword names.
 echo "checking dry-run-env-keyname-redaction (key and DSN env values stay out)"
+signing_key=$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')
+dsn_password=$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')
+database_dsn="postgres://fixture:${dsn_password}@db.invalid/db"
+connection_string=$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')
 printf '%s\n' 'kind: Deployment' 'spec:' '  template:' \
-  '    - name: KC_SIGNING_KEY' '      value: deadbeef-signing' \
+  '    - name: KC_SIGNING_KEY' "      value: ${signing_key}" \
   '    - name: DATABASE_DSN' \
-  '      value: postgres://u:pw@db.internal.example.com/db' \
-  '    - name: DATA_CONNECTION_STRING' '      value: connstring-value' \
+  "      value: ${database_dsn}" \
+  '    - name: DATA_CONNECTION_STRING' "      value: ${connection_string}" \
   '    - name: APP_MODE' '      value: foreground' \
   | "${SCRIPT_DIR}/redact-secret-values.sh" >"${TMP_DIR}/dryrun-env-keynames.yaml"
-for leaked in 'deadbeef-signing' 'postgres://u:pw@db.internal.example.com/db' \
-  'connstring-value'; do
+for leaked in "${signing_key}" "${database_dsn}" "${connection_string}"; do
   grep -Fq "${leaked}" "${TMP_DIR}/dryrun-env-keynames.yaml" \
-    && fail "dry-run-env-keyname-redaction: a key/DSN value was kept (${leaked})"
+    && fail "dry-run-env-keyname-redaction: a key/DSN value was kept"
 done
 grep -q 'value: foreground' "${TMP_DIR}/dryrun-env-keynames.yaml" \
   || fail "dry-run-env-keyname-redaction: a benign value was masked"

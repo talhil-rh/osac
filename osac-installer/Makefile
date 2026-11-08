@@ -680,8 +680,8 @@ validate-inputs: helm-devstack-deps
 endif
 endif
 # The namespace is interpolated into later recipe command text, so every
-# target that interpolates it proves it is a valid DNS label first
-# through the validate-ns prerequisite; the gate reuses the same check.
+# target that interpolates it checks it through validate-ns; the gate runs
+# dependency preparation before that check, but before provisioning recipes.
 # Like the remote-cluster identifiers below, the value reaches the
 # validator through the exported environment, never through Make
 # expansion into the quoted bash -c string.

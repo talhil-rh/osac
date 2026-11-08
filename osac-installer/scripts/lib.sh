@@ -119,7 +119,7 @@ render_osac_chart_offline() {
             if ! bridged=$(helm template "$@" \
                 --set "bmf.netbox.tokenValue=${placeholder_token}" \
                 2>"${bridged_err_file}"); then
-                cat "${bridged_err_file}" >&2
+                offline_render_error "$(cat "${bridged_err_file}")"
                 rm -f "${bridged_err_file}"
                 return 1
             fi
@@ -136,8 +136,20 @@ render_osac_chart_offline() {
             return 0
             ;;
     esac
-    printf '%s\n' "${err}" >&2
+    offline_render_error "${err}"
     return 1
+}
+
+offline_render_error() {
+    echo "ERROR: offline OSAC chart rendering failed; check chart dependencies, values schema and template requirements. Helm diagnostics are suppressed because they may contain sensitive input values." >&2
+    case "$1" in
+        *bmf.netbox.tokenValue*"Invalid type"*|*/bmf/netbox/tokenValue*"got number, want string"*)
+            echo "bmf.netbox.tokenValue: Invalid type; expected string" >&2 ;;
+        *"duplicate metering reader"*)
+            echo "duplicate metering reader: each reader name must be unique" >&2 ;;
+        *"NETRIS_CONTROLLER_URL must be an https:// URL"*)
+            echo "instanceGroups.networkFulfillment.config.NETRIS_CONTROLLER_URL must be an https:// URL without embedded credentials" >&2 ;;
+    esac
 }
 
 # Extract the NetBox token Secret identity the osac chart renders for the
