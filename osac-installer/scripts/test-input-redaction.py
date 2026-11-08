@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise offline validation diagnostics and order-independent redaction."""
 
+import io
 import json
 import os
 from pathlib import Path
@@ -21,11 +22,12 @@ class InputRedactionTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.directory = Path(self.temp.name)
         self.password = secrets.token_hex(24)
+        self.username = secrets.token_hex(8)
         self.hostname = f"{secrets.token_hex(12)}.internal.invalid"
-        self.url = f"https://{secrets.token_hex(8)}:{self.password}@{self.hostname}"
+        self.url = f"https://{self.username}:{self.password}@{self.hostname}"
 
     def assert_private(self, output):
-        for value in (self.password, self.hostname):
+        for value in (self.username, self.password, self.hostname):
             self.assertFalse(value in output, "sensitive canary reached output")
 
     def redact(self, manifest):
@@ -55,7 +57,7 @@ class InputRedactionTests(unittest.TestCase):
                         manifest = f"kind: {kind}\n{payload}metadata:\n  name: {name}\n"
                     if kind == "Secret":
                         manifest += f"stringData:\n  payload: |\n    {self.password}\n"
-                    manifest += "---\nkind: ConfigMap\nmetadata:\n  name: readable\ndata:\n  mode: foreground\n"
+                    manifest += "---\ndata:\n  mode: foreground\nkind: ConfigMap\nmetadata:\n  name: readable\n"
                     self.redact(manifest)
 
     def test_netbox_extra_deploy_real_render(self):
@@ -79,6 +81,44 @@ class InputRedactionTests(unittest.TestCase):
                 self.assertTrue(self.password in result.stdout, "extraDeploy fixture was not rendered")
                 self.redact(result.stdout + "\n---\nkind: ConfigMap\nmetadata:\n  name: readable\ndata:\n  mode: foreground\n")
 
+    def test_comments_quoted_kinds_and_document_boundaries(self):
+        for kind, name in (("Secret", "readable"), ("ConfigMap", "network-ig"),
+                           ("ConfigMap", "osac-infra-evpn-config"),
+                           ("ConfigMap", "osac-infra-mce-config"),
+                           ("ConfigMap", "osac-infra-mce-image-overrides")):
+            with self.subTest(kind=kind):
+                manifest = (
+                    f'data: # payload follows\n  payload: {self.url}\n'
+                    f'  name: {self.password}\nkind: "{kind}"\nmetadata:\n'
+                    f'# ordinary metadata comment\n  namespace: osac\n  name: "{name}"\n'
+                    '--- # adjacent safe document\nkind: ConfigMap\nmetadata:\n'
+                    '  name: readable\ndata:\n  mode: foreground\n'
+                )
+                self.redact(manifest)
+
+    def test_payload_comments_do_not_end_masking(self):
+        self.redact(
+            f'kind: Secret\nmetadata:\n  name: readable\nstringData:\n'
+            f'# ordinary payload comment\n  payload: |\n    {self.password}\n'
+            f'data:\n  payload: {self.url}\n---\nkind: ConfigMap\nmetadata:\n'
+            '  name: readable\ndata:\n  mode: foreground\n'
+        )
+
+    def test_masking_state_resets_between_documents(self):
+        self.redact(
+            f'kind: Secret\nmetadata:\n  name: readable\ndata:\n  payload: {self.url}\n'
+            '---\nkind: Deployment\nspec:\n  - name: API_TOKEN\n'
+            '---\nkind: ConfigMap\nmetadata:\n  name: readable\ndata:\n'
+            '  mode: foreground\n  value: visible\n'
+        )
+
+    def test_failure_diagnostics_do_not_echo_canaries(self):
+        output = io.StringIO()
+        case = unittest.FunctionTestCase(lambda: self.assert_private(self.url))
+        result = unittest.TextTestRunner(stream=output).run(case)
+        self.assertEqual(len(result.failures), 1)
+        self.assert_private(output.getvalue())
+
     def test_aap_validation_does_not_echo_url(self):
         values = self.directory / "aap.json"
         values.write_text(json.dumps({"instanceGroups": {"networkFulfillment": {
@@ -91,6 +131,17 @@ class InputRedactionTests(unittest.TestCase):
         self.assert_private(result.stdout + result.stderr)
         self.assertIn("NETRIS_CONTROLLER_URL", result.stderr)
         self.assertIn("https://", result.stderr)
+        self.assertNotIn("without embedded credentials", result.stderr)
+
+    def test_aap_url_validation_policy_is_unchanged(self):
+        values = self.directory / "aap-valid.json"
+        values.write_text(json.dumps({"instanceGroups": {"networkFulfillment": {
+            "config": {"NETRIS_CONTROLLER_URL": f"https://{self.username}@{self.hostname}/api"}}}}))
+        result = subprocess.run(
+            [HELM, "template", "aap", str(INSTALLER.parent / "osac-aap/charts/aap"),
+             "-f", str(values)], text=True, capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0, "the existing URL policy changed")
 
     def test_make_gate_initial_and_retry_errors_are_private(self):
         chart = self.directory / "chart"

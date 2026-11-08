@@ -8,6 +8,7 @@ set -euo pipefail
 
 ensure_podman_pid_limits() {
     local cluster="$1" kind_command="$2" podman_command="$3" nodes node limit
+    local limit_pattern='^(-1|0|[1-9][0-9]*)$'
     if ! nodes=$("${kind_command}" get nodes --name "${cluster}") || [[ -z "${nodes}" ]]; then
         echo "ERROR: Could not list Podman Kind nodes for '${cluster}'; check the selected connection." >&2
         return 1
@@ -15,7 +16,7 @@ ensure_podman_pid_limits() {
     while IFS= read -r node; do
         [[ -n "${node}" ]] || continue
         if ! limit=$("${podman_command}" inspect --format '{{.HostConfig.PidsLimit}}' "${node}") ||
-           [[ ! "${limit}" =~ ^(-1|0|[1-9][0-9]*)$ ]]; then
+           [[ ! "${limit}" =~ ${limit_pattern} ]]; then
             echo "ERROR: Could not inspect configured Podman PID limit for '${node}'; check the selected connection." >&2
             return 1
         fi
@@ -25,7 +26,7 @@ ensure_podman_pid_limits() {
                 return 1
             fi
             if ! limit=$("${podman_command}" inspect --format '{{.HostConfig.PidsLimit}}' "${node}") ||
-               [[ ! "${limit}" =~ ^(-1|0|[1-9][0-9]*)$ ]] ||
+               [[ ! "${limit}" =~ ${limit_pattern} ]] ||
                { [[ "${limit}" != -1 && "${limit}" != 0 ]] && (( limit < 65536 )); }; then
                 echo "ERROR: Podman PID limit verification failed for '${node}' (reported '${limit}'); expected at least 65536 or unlimited." >&2
                 return 1
@@ -39,10 +40,11 @@ ensure_podman_pid_limits() {
 validate_remote_kubeconfig_secret() {
     local secret_name="$1"
     local secret_key="$2"
+    local secret_name_pattern='^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$'
     local LC_ALL=C
 
     if (( ${#secret_name} > 253 )) || \
-        [[ ! "${secret_name}" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$ ]]; then
+        [[ ! "${secret_name}" =~ ${secret_name_pattern} ]]; then
         echo "ERROR: REMOTE_KUBECONFIG_SECRET_NAME must be a DNS subdomain of at most 253 characters" >&2
         return 2
     fi
@@ -65,10 +67,11 @@ validate_remote_kubeconfig_secret() {
 # carry control characters that corrupt the log.
 validate_namespace() {
     local ns="$1"
+    local namespace_pattern='^[a-z0-9]([-a-z0-9]*[a-z0-9])?$'
     local LC_ALL=C
 
     if (( ${#ns} == 0 || ${#ns} > 63 )) || \
-        [[ ! "${ns}" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]]; then
+        [[ ! "${ns}" =~ ${namespace_pattern} ]]; then
         echo "ERROR: NS must be a valid namespace name: a lowercase DNS label of at most 63 characters (a-z, 0-9, and '-', starting and ending with a-z or 0-9)." >&2
         return 1
     fi
@@ -102,7 +105,7 @@ validate_namespace() {
 #
 # Every other failure -- including a caller-supplied token that violates
 # the schema, however it was supplied (--set, --set-string, or a values
-# file) -- aborts with Helm's own error, so the gate always validates the
+# file) -- aborts with safe diagnostics, so the gate always validates the
 # caller's actual merged value, never a placeholder masking it.
 #
 # Usage: render_osac_chart_offline PLACEHOLDER_TOKEN RELEASE CHART [HELM_ARGS...]
@@ -148,7 +151,7 @@ offline_render_error() {
         *"duplicate metering reader"*)
             echo "duplicate metering reader: each reader name must be unique" >&2 ;;
         *"NETRIS_CONTROLLER_URL must be an https:// URL"*)
-            echo "instanceGroups.networkFulfillment.config.NETRIS_CONTROLLER_URL must be an https:// URL without embedded credentials" >&2 ;;
+            echo "instanceGroups.networkFulfillment.config.NETRIS_CONTROLLER_URL must be an https:// URL" >&2 ;;
     esac
 }
 

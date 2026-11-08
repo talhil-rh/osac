@@ -72,8 +72,11 @@ function flush_document(    index_line, metadata, name) {
     role_rn_block = 0; dns_block = 0
     for (index_line = 1; index_line <= document_length; index_line++) {
         $0 = document[index_line]
-        if (/^kind: /) kind = $2
-        if (/^[^ ]/) metadata = /^metadata:/
+        if (/^kind: /) {
+            kind = $2
+            gsub(/["\047]/, "", kind)
+        }
+        if (/^[^ #]/) metadata = /^metadata:/
         if (metadata && /^  name: /) name = $2
     }
     gsub(/["\047]/, "", name)
@@ -89,10 +92,14 @@ function flush_document(    index_line, metadata, name) {
 }
 function redact_line(line) {
     $0 = line
-    if (/^kind: /) { kind = $2; print; return }
-    if (kind == "Secret" && /^(data|stringData):$/) { in_payload = 1; print; return }
-    if (endpoint_configmap && /^data:$/) { in_payload = 1; print; return }
-    if (/^[^ ]/) in_payload = 0
+    if (/^kind: /) {
+        kind = $2
+        gsub(/["\047]/, "", kind)
+        print; return
+    }
+    if (kind == "Secret" && /^(data|stringData):[[:space:]]*(#.*)?$/) { in_payload = 1; print; return }
+    if (endpoint_configmap && /^data:[[:space:]]*(#.*)?$/) { in_payload = 1; print; return }
+    if (/^[^ #]/) in_payload = 0
     # A masked block-scalar env value: its body lines are deeper-indented
     # than the value line itself and are dropped; a blank line inside the
     # block is dropped too. The first line at or shallower than the value
@@ -262,7 +269,7 @@ function redact_line(line) {
     }
     print
 }
-/^---[[:space:]]*$/ { flush_document(); print "---"; next }
+/^---([[:space:]]+#.*)?[[:space:]]*$/ { separator = $0; flush_document(); print separator; next }
 { document[++document_length] = $0 }
 END { flush_document() }
 '

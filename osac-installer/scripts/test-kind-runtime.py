@@ -480,13 +480,16 @@ create_cluster osac-dev config.yaml {shlex.quote(str(kubeconfig))}
     def test_direct_infra_preserves_vendored_dependencies(self):
         sandbox = self.directory / "installer"
         shutil.copytree(INSTALLER, sandbox)
-        sentinel = sandbox / "charts/osac/charts/preservation-sentinel"
-        sentinel.parent.mkdir(parents=True, exist_ok=True)
-        sentinel.write_text("preserve vendored dependencies\n")
+        sentinels = [sandbox / "charts" / chart / "charts/preservation-sentinel"
+                     for chart in ("osac", "osac-infra")]
+        for sentinel in sentinels:
+            sentinel.parent.mkdir(parents=True, exist_ok=True)
+            sentinel.write_text("preserve vendored dependencies\n")
         with patch.dict(globals(), INSTALLER=sandbox):
             result = self.run_direct_infra()
         self.assert_success(result)
-        self.assertTrue(sentinel.is_file(), "direct infra test deleted vendored dependencies")
+        for sentinel in sentinels:
+            self.assertTrue(sentinel.is_file(), "direct infra test deleted vendored dependencies")
         self.assertNotIn("dependency build", self.log.read_text())
 
     def run_direct_infra(self, cluster_name=None):

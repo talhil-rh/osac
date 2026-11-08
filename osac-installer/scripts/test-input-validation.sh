@@ -1417,7 +1417,8 @@ grep -q 'value: foreground' "${TMP_DIR}/dryrun-env-comment.yaml" \
 echo "checking dry-run-env-keyname-redaction (key and DSN env values stay out)"
 signing_key=$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')
 dsn_password=$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')
-database_dsn="postgres://fixture:${dsn_password}@db.invalid/db"
+dsn_username=$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')
+database_dsn="postgres://${dsn_username}:${dsn_password}@db.invalid/db"
 connection_string=$(od -An -N24 -tx1 /dev/urandom | tr -d ' \n')
 printf '%s\n' 'kind: Deployment' 'spec:' '  template:' \
   '    - name: KC_SIGNING_KEY' "      value: ${signing_key}" \
