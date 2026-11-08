@@ -65,24 +65,39 @@ validate_remote_kubeconfig_secret() {
 # only when netbox_seed_check (same shell) exported NETBOX_TOKEN_SEEDED=1:
 # without the seed hook nothing creates the Secret, so the missing token is
 # a real input error the install would hit only after the cluster changed.
-# Every other failure -- including a caller-supplied token that violates
-# the schema, however it was supplied (--set, --set-string, or a values
-# file) -- aborts with Helm's own error, so the gate always validates the
-# caller's actual merged value, never a placeholder masking it.
+# The bridge is legitimate only when the seed hook's Secret identity --
+# name, namespace, and key, recorded by netbox_seed_check from the rendered
+# hook -- matches the Secret the osac chart reads: a caller override that
+# diverges (for example bmf.netbox.tokenSecretKey) would pass a bridged
+# render yet fail the real install only after install-infra changed the
+# cluster, so a mismatch fails the gate instead. Every other failure --
+# including a caller-supplied token that violates the schema, however it
+# was supplied (--set, --set-string, or a values file) -- aborts with
+# Helm's own error, so the gate always validates the caller's actual
+# merged value, never a placeholder masking it.
 #
 # Usage: render_osac_chart_offline PLACEHOLDER_TOKEN RELEASE CHART [HELM_ARGS...]
 render_osac_chart_offline() {
     local placeholder_token="$1"
     shift
-    local err
+    local err bridged bridged_err_file
     if err=$(helm template "$@" 2>&1 >/dev/null); then
         return 0
     fi
     case "${err}" in
         *"netbox.tokenValue is required when Secret"*)
             if [ "${NETBOX_TOKEN_SEEDED:-0}" = "1" ]; then
-                helm template "$@" --set "bmf.netbox.tokenValue=${placeholder_token}" >/dev/null
-                return
+                bridged_err_file=$(mktemp)
+                if bridged=$(helm template "$@" \
+                    --set "bmf.netbox.tokenValue=${placeholder_token}" \
+                    2>"${bridged_err_file}"); then
+                    rm -f "${bridged_err_file}"
+                    netbox_seed_identity_matches "${bridged}" "${placeholder_token}"
+                    return
+                fi
+                cat "${bridged_err_file}" >&2
+                rm -f "${bridged_err_file}"
+                return 1
             fi
             ;;
     esac
@@ -90,14 +105,60 @@ render_osac_chart_offline() {
     return 1
 }
 
-# Export NETBOX_TOKEN_SEEDED=1 when the given infra-chart render deploys the
-# netbox-token-seed hook: the post-install Job that creates the NetBox token
-# Secret during install-infra, before install-osac renders. render_osac_chart_offline
-# may bridge a missing NetBox token only when this is set. Never fails: the
-# gate renders the infra chart itself with full error reporting right before
-# this runs, so here a render failure simply counts as not seeded. Must run
-# in the same shell as render_osac_chart_offline -- make recipe lines are
-# separate shells, so the gate calls both in one recipe line.
+# Extract the NetBox token Secret identity the osac chart renders for the
+# bridged placeholder token -- the Secret whose stringData carries the
+# placeholder is the one the bmf subchart creates from
+# bmf.secrets.netboxToken / bmf.netbox.tokenSecretKey -- and compare it
+# with the seed hook's identity exported by netbox_seed_check. Any
+# mismatch fails the gate before a cluster change; the message names both
+# identities so the caller can see which override diverged.
+# Usage: netbox_seed_identity_matches RENDER PLACEHOLDER_TOKEN
+netbox_seed_identity_matches() {
+    local render="$1" placeholder="$2"
+    local identity bmf_name bmf_ns bmf_key
+    identity=$(printf '%s\n' "${render}" | awk -v ph="${placeholder}" '
+        /^---$/ { kind = ""; name = ""; ns = ""; next }
+        /^kind: / { kind = $2 }
+        /^  name: / { if (name == "") name = $2 }
+        /^  namespace: / { if (ns == "") ns = $2 }
+        index($0, ph) != 0 && kind == "Secret" && !done {
+            key = $1
+            sub(/:$/, "", key)
+            gsub(/"/, "", key)
+            gsub(/"/, "", name)
+            gsub(/"/, "", ns)
+            print name
+            print ns
+            print key
+            done = 1
+        }')
+    bmf_name=$(printf '%s\n' "${identity}" | sed -n 1p)
+    bmf_ns=$(printf '%s\n' "${identity}" | sed -n 2p)
+    bmf_key=$(printf '%s\n' "${identity}" | sed -n 3p)
+    if [ -z "${bmf_name}" ] || [ -z "${bmf_key}" ]; then
+        echo "ERROR: could not determine which NetBox token Secret the osac chart reads; no cluster changes were made." >&2
+        return 1
+    fi
+    if [ "${bmf_name}" != "${NETBOX_SEED_SECRET_NAME}" ] \
+        || [ "${bmf_ns}" != "${NETBOX_SEED_SECRET_NS}" ] \
+        || [ "${bmf_key}" != "${NETBOX_SEED_SECRET_KEY}" ]; then
+        echo "ERROR: NetBox token Secret identity mismatch: the seed hook creates Secret ${NETBOX_SEED_SECRET_NAME}/${NETBOX_SEED_SECRET_KEY} in namespace ${NETBOX_SEED_SECRET_NS}, but the osac chart reads Secret ${bmf_name}/${bmf_key} in namespace ${bmf_ns}; no cluster changes were made. Align bmf.secrets.netboxToken, bmf.netbox.tokenSecretKey, and the namespaces with the infra seed hook (netbox.apiTokenSecret, osacNamespace)." >&2
+        return 1
+    fi
+    return 0
+}
+
+# Export NETBOX_TOKEN_SEEDED=1 plus the seed hook's Secret identity --
+# NETBOX_SEED_SECRET_NAME, NETBOX_SEED_SECRET_NS, and NETBOX_SEED_SECRET_KEY
+# -- when the given infra-chart render deploys the netbox-token-seed hook:
+# the post-install Job that creates the NetBox token Secret during
+# install-infra, before install-osac renders. render_osac_chart_offline may
+# bridge a missing NetBox token only when this is set and the identity
+# matches the Secret the osac chart reads. Never fails: the gate renders
+# the infra chart itself with full error reporting right before this runs,
+# so here a render failure simply counts as not seeded. Must run in the
+# same shell as render_osac_chart_offline -- make recipe lines are separate
+# shells, so the gate calls both in one recipe line.
 #
 # The release-prefixed names ("-netbox-token-seed", from
 # {{ .Release.Name }}-netbox-token-seed) are the discriminator: the hook's
@@ -105,16 +166,54 @@ render_osac_chart_offline() {
 # the Job, ServiceAccount, and RBAC carrying the prefixed name are gated on
 # netbox.enabled.
 #
+# The identity is read from the rendered hook itself -- the Job's OPERATOR_NS
+# and SECRET_NAME env values and the Secret key in the seed script's
+# `oc create secret --from-literal=<key>=` call -- so it follows the values
+# this install actually renders instead of assuming defaults. The key is
+# extracted only from the netbox-token-seed.sh block of the hook-scripts
+# ConfigMap: other hook scripts create Secrets of their own. If any part of
+# the identity cannot be extracted the hook counts as not seeded, leaving
+# the bridge off so the gate reports the underlying token error rather than
+# bridging an unverifiable identity.
+#
 # Usage: netbox_seed_check RELEASE CHART [HELM_ARGS...]
 netbox_seed_check() {
     local render
     NETBOX_TOKEN_SEEDED=0
+    NETBOX_SEED_SECRET_NAME=""
+    NETBOX_SEED_SECRET_NS=""
+    NETBOX_SEED_SECRET_KEY=""
     if render=$(helm template "$@" 2>/dev/null); then
         case "${render}" in
-            *-netbox-token-seed*) NETBOX_TOKEN_SEEDED=1 ;;
+            *-netbox-token-seed*)
+                NETBOX_SEED_SECRET_NS=$(printf '%s\n' "${render}" \
+                    | awk '/^ *- name: OPERATOR_NS$/ { want = 1; next }
+                           want && /^ *value: / && !done {
+                               gsub(/"/, "", $2); print $2; done = 1 }')
+                NETBOX_SEED_SECRET_NAME=$(printf '%s\n' "${render}" \
+                    | awk '/^ *- name: SECRET_NAME$/ { want = 1; next }
+                           want && /^ *value: / && !done {
+                               gsub(/"/, "", $2); print $2; done = 1 }')
+                NETBOX_SEED_SECRET_KEY=$(printf '%s\n' "${render}" \
+                    | awk '/^  netbox-token-seed\.sh:/ { in_script = 1; next }
+                           in_script && /^  [^ ]/ { in_script = 0 }
+                           in_script && /--from-literal=/ && !done {
+                               line = $0
+                               sub(/^.*--from-literal=/, "", line)
+                               sub(/=.*/, "", line)
+                               print line
+                               done = 1
+                           }')
+                if [ -n "${NETBOX_SEED_SECRET_NAME}" ] \
+                    && [ -n "${NETBOX_SEED_SECRET_NS}" ] \
+                    && [ -n "${NETBOX_SEED_SECRET_KEY}" ]; then
+                    NETBOX_TOKEN_SEEDED=1
+                fi
+                ;;
         esac
     fi
-    export NETBOX_TOKEN_SEEDED
+    export NETBOX_TOKEN_SEEDED NETBOX_SEED_SECRET_NAME \
+        NETBOX_SEED_SECRET_NS NETBOX_SEED_SECRET_KEY
 }
 
 # Retry a condition until it succeeds or times out, optionally running a command each iteration

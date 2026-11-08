@@ -229,21 +229,64 @@ while IFS= read -r infra_cmd; do
   esac
 done <<<"${infra_arg_cmds}"
 
-# Gate/install parity for OIDC_IDP_CA_HELM_ARGS: the gate's osac-infra
-# render must apply the same CA input the install's upgrade applies, so an
-# unreadable or schema-breaking CA file fails validation before any cluster
-# change instead of only after install-infra has already run.
+# Gate/install parity for OIDC_IDP_CA_HELM_ARGS: every helm command
+# touching osac-infra in the install plan -- the gate's render, the
+# seed-check render, the EVPN deadline render, and the upgrade -- must
+# apply the same CA input, so a CA file (or a values-file caPem it
+# overrides) is validated identically everywhere and an unreadable or
+# schema-breaking input fails before any cluster change.
 for ca_platform in kind openshift; do
   ca_plan="${TMP_DIR}/oidc-ca-${ca_platform}.plan"
   MOCK_LOG="${LOG}" PATH="${STUB_BIN}:${PATH}" \
-    make -C "${SANDBOX}" --no-print-directory -n validate-inputs \
+    make -C "${SANDBOX}" --no-print-directory -n install-infra \
     PLATFORM="${ca_platform}" PROFILE=dev NS=osac \
     OIDC_IDP_CA_FILE=/nonexistent-ca.pem \
-    >"${ca_plan}" 2>/dev/null || fail "make -n validate-inputs (${ca_platform}) failed"
-  join_continuations <"${ca_plan}" | grep 'helm template osac-infra' \
+    >"${ca_plan}" 2>/dev/null || fail "make -n install-infra (${ca_platform}) failed"
+  ca_cmds=$(join_continuations <"${ca_plan}" \
+    | sed -E 's/(helm (template|upgrade))/\n\1/g' \
+    | grep -E 'helm (template|upgrade).* osac-infra ' || true)
+  [ -n "${ca_cmds}" ] \
+    || fail "install-infra (${ca_platform}): no osac-infra helm commands in the plan"
+  while IFS= read -r ca_cmd; do
+    case "${ca_cmd}" in
+      *--set-file\ keycloak.oidcIdpTrust.caPem*) ;;
+      *) fail "install-infra (${ca_platform}): OIDC IdP CA input missing from: ${ca_cmd}" ;;
+    esac
+  done <<<"${ca_cmds}"
+  join_continuations <"${ca_plan}" | grep 'netbox_seed_check osac-infra' \
     | grep -q -- '--set-file keycloak.oidcIdpTrust.caPem' \
-    || fail "validate-inputs (${ca_platform}): the gate render omits the OIDC IdP CA input"
+    || fail "install-infra (${ca_platform}): the seed-check render omits the OIDC IdP CA input"
 done
+
+# Cluster-lookup output must reach Make only through a validating filter:
+# the lookups feed $(eval), so a compromised or misbehaving API response
+# carrying Make syntax must fail the gate instead of executing. The
+# sentinel file proves no injection ran.
+echo "checking injection (Make syntax in cluster lookups fails the gate)"
+inj_bin="${TMP_DIR}/inj-bin"
+cp -a "${STUB_BIN}" "${inj_bin}"
+inj_sentinel="${TMP_DIR}/injection-ran"
+cat >"${inj_bin}/oc" <<STUB
+#!/usr/bin/env bash
+case "\$*" in
+  *clusterversion*) printf '4\$(shell touch \${INJECTION_SENTINEL}).22.14\n' ;;
+  *ingresses.config/cluster*) printf '\$(shell touch \${INJECTION_SENTINEL})apps.example.com\n' ;;
+esac
+exit 0
+STUB
+chmod +x "${inj_bin}/oc"
+: >"${LOG}"
+if INJECTION_SENTINEL="${inj_sentinel}" MOCK_LOG="${LOG}" PATH="${inj_bin}:${PATH}" \
+  make -C "${SANDBOX}" --no-print-directory validate-inputs \
+  PLATFORM=openshift PROFILE=dev NS=osac \
+  >"${TMP_DIR}/inj.out" 2>"${TMP_DIR}/inj.err"; then
+  fail "injection: the gate accepted Make-syntax-bearing cluster lookups"
+fi
+[ ! -e "${inj_sentinel}" ] \
+  || fail "injection: cluster-lookup output executed as Make code"
+grep -q 'could not determine the OpenShift version' "${TMP_DIR}/inj.err" \
+  || fail "injection: the failure did not name the version lookup"
+assert_prevalidation_commands injection
 
 # Remote-cluster inputs: the gate must reject invalid static identifiers
 # before any cluster mutation -- install-osac's own re-check runs only after
@@ -480,7 +523,7 @@ render_failure_matching \
 # (helm template's lookup returns nil), so the raw render fails the
 # lookup-dependent branch. The gate bridges exactly that failure through
 # render_osac_chart_offline (scripts/lib.sh) with a render-only placeholder
-# (NETBOX_OFFLINE_TOKEN in the Makefile; it must match the value asserted
+# (NETBOX_OFFLINE_PLACEHOLDER in the Makefile; it must match the value asserted
 # below) that is never passed to an installation -- and only when
 # netbox_seed_check first saw this install's infra values deploy the seed
 # hook. The hostname --sets mirror the OpenShift gate branch -- the
@@ -513,6 +556,12 @@ netbox_seed_check osac-infra "${INFRA_CHART_DIR}" \
   --set osacNamespace=osac
 [ "${NETBOX_TOKEN_SEEDED}" = "1" ] \
   || fail "netbox-seed-hook-present: the netbox profile's infra render deploys no netbox-token-seed"
+[ "${NETBOX_SEED_SECRET_NAME}" = "netbox-api-token" ] \
+  || fail "netbox-seed-hook-present: wrong seed Secret name ${NETBOX_SEED_SECRET_NAME}"
+[ "${NETBOX_SEED_SECRET_NS}" = "osac" ] \
+  || fail "netbox-seed-hook-present: wrong seed Secret namespace ${NETBOX_SEED_SECRET_NS}"
+[ "${NETBOX_SEED_SECRET_KEY}" = "token" ] \
+  || fail "netbox-seed-hook-present: wrong seed Secret key ${NETBOX_SEED_SECRET_KEY}"
 
 echo "checking netbox-seed-hook-absent (bmaas-ci infra deploys none)"
 netbox_seed_check osac-infra "${INFRA_CHART_DIR}" \
@@ -522,8 +571,10 @@ netbox_seed_check osac-infra "${INFRA_CHART_DIR}" \
   || fail "netbox-seed-hook-absent: bmaas-ci infra unexpectedly seeds the token"
 
 # The bridge: only the specific lookup failure above is retried with the
-# placeholder, and only for a seeded install, so the profile renders like
-# the gate does.
+# placeholder, and only for a seeded install whose seed-hook Secret
+# identity matches what the osac chart reads, so the profile renders like
+# the gate does. The render runs in the osac namespace like the gate's
+# own --namespace $(NS).
 echo "checking netbox-profile-gate-placeholder (bridged render)"
 netbox_seed_check osac-infra "${INFRA_CHART_DIR}" \
   --values "${INSTALLER_DIR}/values/bmaas-ci/infra.yaml" \
@@ -531,8 +582,40 @@ netbox_seed_check osac-infra "${INFRA_CHART_DIR}" \
   --set osacNamespace=osac
 render_osac_chart_offline offline-validation-placeholder \
   osac "${OSAC_CHART_DIR}" --values "${OSAC_CHART_DIR}/ci/default-values.yaml" \
+  --namespace osac \
   "${NETBOX_PROFILE_ARGS[@]}" \
   || fail "netbox-profile-gate-placeholder: the bridged render failed"
+
+# The bridge must verify the seed hook's Secret identity: a caller override
+# that diverges from the seeded Secret (here the key, via
+# bmf.netbox.tokenSecretKey) would pass a bridged render yet fail the real
+# install only after install-infra changed the cluster. The gate fails
+# instead, naming both identities.
+echo "checking netbox-key-mismatch (seeded key differs from the chart's key)"
+if render_osac_chart_offline offline-validation-placeholder \
+    osac "${OSAC_CHART_DIR}" --values "${OSAC_CHART_DIR}/ci/default-values.yaml" \
+    --namespace osac \
+    "${NETBOX_PROFILE_ARGS[@]}" \
+    --set bmf.netbox.tokenSecretKey=api-token \
+    2>"${netbox_gate_err}"; then
+  fail "netbox-key-mismatch: the gate bridged a mismatched Secret key"
+fi
+grep -q 'identity mismatch' "${netbox_gate_err}" \
+  || fail "netbox-key-mismatch: the failure did not name the identity mismatch"
+grep -q 'api-token' "${netbox_gate_err}" \
+  || fail "netbox-key-mismatch: the failure did not name the divergent key"
+
+echo "checking netbox-name-mismatch (seeded name differs from the chart's name)"
+if render_osac_chart_offline offline-validation-placeholder \
+    osac "${OSAC_CHART_DIR}" --values "${OSAC_CHART_DIR}/ci/default-values.yaml" \
+    --namespace osac \
+    "${NETBOX_PROFILE_ARGS[@]}" \
+    --set bmf.secrets.netboxToken=other-token \
+    2>"${netbox_gate_err}"; then
+  fail "netbox-name-mismatch: the gate bridged a mismatched Secret name"
+fi
+grep -q 'identity mismatch' "${netbox_gate_err}" \
+  || fail "netbox-name-mismatch: the failure did not name the identity mismatch"
 
 # Without the seed hook nothing creates the token Secret, so the same
 # lookup failure is a real input error: the bridge must not paper over it,

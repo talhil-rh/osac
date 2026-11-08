@@ -496,7 +496,7 @@ endif
 		kubectl apply --server-side --force-conflicts -f "$$f"; \
 	done
 else
-	$(eval OCP_VERSION := $(shell oc get clusterversion version -o jsonpath='{.status.desired.version}' | cut -d. -f1,2))
+	$(eval OCP_VERSION := $(shell oc get clusterversion version -o jsonpath='{.status.desired.version}' | cut -d. -f1,2 | grep -Eo '^[0-9]+\.[0-9]+' | head -1))
 	@bash -c 'source scripts/lib.sh && \
 		for ns in ansible-aap cert-manager-operator cert-manager openshift-storage metallb-system multicluster-engine openshift-cnv osac-kafka; do \
 			wait_for_namespace_cleanup "$$ns"; \
@@ -508,7 +508,7 @@ else
 		$(INFRA_HELM_ARGS) \
 		--timeout 30m --wait
 	@bash -c 'source scripts/lib.sh && wait_for_namespace_cleanup keycloak'
-	$(eval DOMAIN := $(shell oc get ingresses.config/cluster -o jsonpath='{.spec.domain}'))
+	$(eval DOMAIN := $(shell oc get ingresses.config/cluster -o jsonpath='{.spec.domain}' | grep -Eo '^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*' | head -1))
 	@[ -n "$(DOMAIN)" ] || { echo "ERROR: could not determine cluster domain" >&2; exit 1; }
 	# Render the full chart because the EVPN Job is optional and --show-only fails
 	# when EVPN is disabled. Match Helm's wait to its deadline plus a margin.
@@ -521,6 +521,7 @@ else
 		--set keycloak.route.hostname=https://keycloak-keycloak.$(DOMAIN) \
 		--set "bundledVault.keycloakIssuerUrl=https://keycloak-keycloak.$(DOMAIN)/realms/osac" \
 		$(INFRA_HELM_ARGS) \
+		$(OIDC_IDP_CA_HELM_ARGS) \
 		2>/dev/null \
 		| awk \
 			-e '/^kind: Job$$/ { job=1 }' \
@@ -619,7 +620,7 @@ endif
 # real input error. A token supplied by the caller through any channel
 # (--set, --set-string, or a values file) renders without the placeholder,
 # so the gate validates the caller's actual value.
-NETBOX_OFFLINE_TOKEN := offline-validation-placeholder
+NETBOX_OFFLINE_PLACEHOLDER := offline-validation-placeholder
 
 .PHONY: validate-inputs
 # An OCI-ref install renders the pulled chart, so the local osac chart's
@@ -660,8 +661,8 @@ ifeq ($(PLATFORM),kind)
 		--namespace osac-infra \
 		-f $(INFRA_VALUES) $(INFRA_VALUES_EXTRA) \
 		--set osacNamespace=$(NS) \
-		$(INFRA_HELM_ARGS) && \
-	render_osac_chart_offline "$(NETBOX_OFFLINE_TOKEN)" \
+		$(INFRA_HELM_ARGS) $(OIDC_IDP_CA_HELM_ARGS) && \
+	render_osac_chart_offline "$(NETBOX_OFFLINE_PLACEHOLDER)" \
 		osac $(if $(OSAC_CHART_OCI_REF),$(OSAC_CHART_OCI_REF)$(if $(OSAC_CHART_OCI_VERSION), --version $(OSAC_CHART_OCI_VERSION)),$(OSAC_CHART)) \
 		-f $(INSTANCE_VALUES) $(INSTANCE_VALUES_EXTRA) \
 		--namespace $(NS) \
@@ -681,8 +682,8 @@ ifeq ($(PROFILE),dev-full)
 	|| { echo "ERROR: invalid installer inputs for osac-devstack; no cluster changes were made. Fix the values reported above and retry." >&2; exit 1; }
 endif
 else
-	$(eval OCP_VERSION := $(shell oc get clusterversion version -o jsonpath='{.status.desired.version}' | cut -d. -f1,2))
-	$(eval DOMAIN := $(shell oc get ingresses.config/cluster -o jsonpath='{.spec.domain}'))
+	$(eval OCP_VERSION := $(shell oc get clusterversion version -o jsonpath='{.status.desired.version}' | cut -d. -f1,2 | grep -Eo '^[0-9]+\.[0-9]+' | head -1))
+	$(eval DOMAIN := $(shell oc get ingresses.config/cluster -o jsonpath='{.spec.domain}' | grep -Eo '^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*' | head -1))
 	@[ -n "$(OCP_VERSION)" ] || { echo "ERROR: could not determine the OpenShift version for input validation. Is oc logged in?" >&2; exit 1; }
 	@[ -n "$(DOMAIN)" ] || { echo "ERROR: could not determine cluster domain for input validation. Is oc logged in?" >&2; exit 1; }
 	@helm template osac-deps $(DEPS_CHART) \
@@ -707,8 +708,8 @@ else
 		--namespace osac-infra \
 		--values $(INFRA_VALUES) $(INFRA_VALUES_EXTRA) \
 		--set osacNamespace=$(NS) \
-		$(INFRA_HELM_ARGS) && \
-	render_osac_chart_offline "$(NETBOX_OFFLINE_TOKEN)" \
+		$(INFRA_HELM_ARGS) $(OIDC_IDP_CA_HELM_ARGS) && \
+	render_osac_chart_offline "$(NETBOX_OFFLINE_PLACEHOLDER)" \
 		osac $(if $(OSAC_CHART_OCI_REF),$(OSAC_CHART_OCI_REF)$(if $(OSAC_CHART_OCI_VERSION), --version $(OSAC_CHART_OCI_VERSION)),$(OSAC_CHART)) \
 		-f $(INSTANCE_VALUES) $(INSTANCE_VALUES_EXTRA) \
 		--namespace $(NS) \
@@ -751,7 +752,7 @@ ifneq ($(PLATFORM),kind)
 		osac.openshift.io/project=osac-aap \
 		-n $(NS) --overwrite
 	@bash -c 'source scripts/lib.sh && check_postgres_prerequisites "$(NS)" "$(INFRA_VALUES)"'
-	$(eval DOMAIN := $(shell oc get ingresses.config/cluster -o jsonpath='{.spec.domain}'))
+	$(eval DOMAIN := $(shell oc get ingresses.config/cluster -o jsonpath='{.spec.domain}' | grep -Eo '^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*' | head -1))
 	@[ -n "$(DOMAIN)" ] || { echo "ERROR: Could not determine cluster domain. Is oc logged in?" >&2; exit 1; }
 endif
 	@if [[ -n "$${REMOTE_KUBECONFIG:-}" ]]; then \

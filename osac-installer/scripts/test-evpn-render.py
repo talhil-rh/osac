@@ -43,7 +43,14 @@ def render(release: str, chart: pathlib.Path, *args: str) -> list[dict[str, Any]
 
 
 def expect_render_failure(chart: pathlib.Path, values_file: pathlib.Path) -> None:
-    result = subprocess.run(
+    result = render_failure_result(chart, values_file)
+    assert result.returncode != 0, "invalid EVPN values unexpectedly rendered"
+
+
+def render_failure_result(
+    chart: pathlib.Path, values_file: pathlib.Path
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
         [
             os.environ.get("HELM_BIN", "helm"),
             "template",
@@ -58,7 +65,6 @@ def expect_render_failure(chart: pathlib.Path, values_file: pathlib.Path) -> Non
         text=True,
         check=False,
     )
-    assert result.returncode != 0, "invalid EVPN values unexpectedly rendered"
 
 
 def named(
@@ -491,6 +497,49 @@ def test_invalid_values() -> None:
             expect_render_failure(INFRA_CHART, values_file)
 
 
+def test_validation_errors_do_not_log_node_names() -> None:
+    # Validation errors must not echo node names or peer addresses: they can
+    # be internal hostnames or router IPs, and a failed render's error text
+    # ends up in installer logs. The messages identify the offending node by
+    # index. peerAddress must be IPv4 to pass the chart schema, so the render
+    # reaches the template's own duplicate checks.
+    node_hostname = "worker-0.internal.example.com"
+    peer_ip = "10.11.12.1"
+    duplicate_name = base_values(
+        [
+            node(node_hostname, "10.200.255.1", [uplink("ens6", peer_ip)]),
+            node(node_hostname, "10.200.255.2", [uplink("ens7", "10.11.12.2")]),
+        ]
+    )
+    duplicate_peer = base_values(
+        [
+            node(
+                node_hostname,
+                "10.200.255.1",
+                [uplink("ens6", peer_ip), uplink("ens7", peer_ip)],
+            )
+        ]
+    )
+    with tempfile.TemporaryDirectory(prefix="evpn-nolog-") as temp:
+        directory = pathlib.Path(temp)
+        for name, values in (
+            ("duplicate-name.yaml", duplicate_name),
+            ("duplicate-peer.yaml", duplicate_peer),
+        ):
+            values_file = write_values(directory, name, values)
+            result = render_failure_result(INFRA_CHART, values_file)
+            assert result.returncode != 0, (
+                f"{name}: invalid EVPN values unexpectedly rendered"
+            )
+            assert node_hostname not in result.stderr, (
+                f"{name}: the failure logged the node name"
+            )
+            assert peer_ip not in result.stderr, (
+                f"{name}: the failure logged the peer address"
+            )
+            assert "duplicate" in result.stderr, f"{name}: no failure message"
+
+
 def main() -> None:
     test_defaults()
     test_granted_verbs_aggregates_rules_and_wildcards()
@@ -502,6 +551,7 @@ def main() -> None:
     test_uplink_without_address()
     test_nmstate_install_disabled()
     test_invalid_values()
+    test_validation_errors_do_not_log_node_names()
     print("EVPN host networking Helm render contract passed.")
 
 
