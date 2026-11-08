@@ -12,7 +12,9 @@
 # carrying registry hostnames in its manifest, and
 # `osac-infra-mce-config`, carrying internal OS image mirror URLs in its
 # osImages); container env entry values whose variable name is
-# credential-shaped (PASSWORD/SECRET/TOKEN/ACCESS_KEY/AUTH/...) or
+# credential-shaped (PASSWORD/SECRET/TOKEN/ACCESS_KEY/AUTH/..., any
+# *_KEY-suffixed name such as SIGNING_KEY or ENCRYPTION_KEY, and
+# DSN/connection-string names, which often embed a password) or
 # endpoint-shaped (URL/HOST/ADDR/..., plus Kafka broker lists such as
 # KAFKA_BROKERS, whose metering value carries internal broker hosts),
 # which callers can inject into
@@ -154,7 +156,8 @@ endpoint_configmap && /^data:$/ { in_payload = 1; print; next }
         if ($0 ~ /^ *#/ || $0 ~ /^ *$/) { print; next }
         env_await_value = 0
         if ($0 ~ /^[[:space:]]+value: ./ && (tolower(env_name) ~ \
-            /(password|passwd|passphrase|secret|token|credential|api_key|private_key|access_key|auth|session)/ \
+            /(password|passwd|passphrase|secret|token|credential|api_key|private_key|access_key|auth|session|dsn|conn(ection)?_?str)/ \
+            || tolower(env_name) ~ /(^|_)key$/ \
             || tolower(env_name) ~ /(url|host|endpoint|addr)/ \
             || tolower(env_name) == "kafka_brokers")) {
             if ($0 ~ /value: [|>]/) {

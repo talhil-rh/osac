@@ -183,6 +183,47 @@ assert_no_devstack_deps openshift-osac install-osac PLATFORM=openshift \
 assert_no_devstack_deps multicluster install-multicluster \
   PLATFORM=openshift PROFILE=vmaas-ci NS=osac REMOTE_KUBECONFIG="${LOG}"
 
+# The AAP license and the remote API address are static OSAC-install
+# inputs: their checks must precede the first cluster mutation in every
+# entry point that installs OSAC, including the composed `make install`
+# (infra first), while install-infra alone must not require a license.
+assert_static_inputs_first() {
+  local target=$1
+  shift
+  local plan="${TMP_DIR}/${target//\//_}-static.plan"
+  MOCK_LOG="${LOG}" PATH="${STUB_BIN}:${PATH}" \
+    make -C "${SANDBOX}" --no-print-directory -n "${target}" "$@" \
+    >"${plan}" 2>"${TMP_DIR}/static-plan.err" \
+    || fail "make -n ${target} $* failed"
+  local license_line address_line first_mutation
+  license_line=$(grep -n 'AAP_LICENSE_FILE is required' "${plan}" | head -1 | cut -d: -f1)
+  address_line=$(grep -n 'REMOTE_API_ADDRESS must use https' "${plan}" | head -1 | cut -d: -f1)
+  first_mutation=$(grep -nE "${mutation_commands}" "${plan}" | head -1 | cut -d: -f1)
+  [ -n "${license_line}" ] \
+    || fail "${target} ($*): no license check in the plan"
+  if [ -n "${first_mutation}" ] && [ "${license_line}" -gt "${first_mutation}" ]; then
+    fail "${target} ($*): the license check follows a cluster mutation"
+  fi
+  if [ -n "${address_line}" ] && [ -n "${first_mutation}" ] \
+    && [ "${address_line}" -gt "${first_mutation}" ]; then
+    fail "${target} ($*): the remote address check follows a cluster mutation"
+  fi
+}
+
+assert_static_inputs_first install PLATFORM=openshift PROFILE=dev NS=osac
+assert_static_inputs_first install-osac PLATFORM=openshift PROFILE=dev NS=osac
+
+# install-infra alone must not require the license: the check belongs to
+# the OSAC install only.
+infra_static_plan="${TMP_DIR}/infra-static.plan"
+MOCK_LOG="${LOG}" PATH="${STUB_BIN}:${PATH}" \
+  make -C "${SANDBOX}" --no-print-directory -n install-infra \
+  PLATFORM=openshift PROFILE=dev NS=osac \
+  >"${infra_static_plan}" 2>/dev/null \
+  || fail "infra-static: the install-infra plan failed"
+grep -q 'AAP_LICENSE_FILE' "${infra_static_plan}" \
+  && fail "infra-static: install-infra requires the AAP license"
+
 # install-multicluster's gate must validate the multicluster infra overlay
 # too: the recipe only passes it to the recursive install-infra, which runs
 # after prepare-remote-cluster has already changed the remote cluster.
@@ -461,6 +502,46 @@ if MOCK_LOG="${LOG}" PATH="${STUB_BIN}:${PATH}" \
 fi
 grep -q 'REMOTE_KUBECONFIG_SECRET_NAME must be a DNS subdomain' "${TMP_DIR}/remote-inj.err" \
   || fail "remote-injection: the value did not reach the validator as a literal"
+
+# The AAP license is a static input to the OSAC install only: `make
+# install` composes install-infra before install-osac, so a missing
+# license must be rejected before install-infra creates namespaces and
+# waits for readiness.
+echo "checking license-before-infra (a missing license fails before install-infra)"
+: >"${LOG}"
+if MOCK_LOG="${LOG}" PATH="${STUB_BIN}:${PATH}" \
+  make -C "${SANDBOX}" --no-print-directory install \
+    PLATFORM=openshift PROFILE=dev NS=osac \
+    AAP_LICENSE_FILE="${TMP_DIR}/missing-license.zip" \
+    >"${TMP_DIR}/license-missing.out" 2>"${TMP_DIR}/license-missing.err"; then
+  fail "license-before-infra: make install succeeded with a missing license"
+fi
+grep -q 'AAP_LICENSE_FILE not found' "${TMP_DIR}/license-missing.err" \
+  || fail "license-before-infra: the failure did not name the license"
+if grep -Eq "${mutation_commands}" "${LOG}"; then
+  fail "license-before-infra: a cluster mutation ran before the license check"
+fi
+
+# The remote API address is static too: a non-https value must fail in
+# validate-osac-inputs, before install-osac creates the namespace (the
+# kubeconfig readability and Secret staging stay at install time).
+echo "checking remote-address-scheme (a non-https remote address fails before mutations)"
+: >"${LOG}"
+: >"${TMP_DIR}/license.zip"
+if MOCK_LOG="${LOG}" PATH="${STUB_BIN}:${PATH}" \
+  make -C "${SANDBOX}" --no-print-directory install-osac \
+    PLATFORM=openshift PROFILE=vmaas-ci NS=osac \
+    AAP_LICENSE_FILE="${TMP_DIR}/license.zip" \
+    REMOTE_KUBECONFIG="${LOG}" \
+    REMOTE_API_ADDRESS="http://insecure.internal.example.com" \
+    >"${TMP_DIR}/addr-bad.out" 2>"${TMP_DIR}/addr-bad.err"; then
+  fail "remote-address-scheme: install-osac succeeded with a non-https address"
+fi
+grep -q 'REMOTE_API_ADDRESS must use https' "${TMP_DIR}/addr-bad.err" \
+  || fail "remote-address-scheme: the failure did not name the address rule"
+if grep -Eq "${mutation_commands}" "${LOG}"; then
+  fail "remote-address-scheme: a cluster mutation ran before the address check"
+fi
 assert_prevalidation_commands remote-injection
 
 # The gate's osac-chart render and install-osac's upgrade share the same
@@ -1150,6 +1231,8 @@ echo "checking dry-run-env-redaction (overlay env passwords stay out)"
 env_password="env-password-$(date +%s)-$$"
 env_session="env-session-$(date +%s)-$$"
 env_apikey="env-apikey-$(date +%s)-$$"
+env_signkey="env-signkey-$(date +%s)-$$"
+env_dsn="env-dsn-$(date +%s)-$$"
 cat >"${TMP_DIR}/dryrun-env-token.yaml" <<ENV_EOF
 keycloak:
   extraEnv:
@@ -1161,6 +1244,10 @@ keycloak:
       value: ${env_session}
     - name: KC_SPI_DEMO_CLIENT
       value: ${env_apikey}
+    - name: KC_SPI_DEMO_SIGNING_KEY
+      value: ${env_signkey}
+    - name: KC_SPI_DEMO_DATABASE_DSN
+      value: ${env_dsn}
 ENV_EOF
 if ! helm template osac-infra "${INFRA_CHART_DIR}" \
     --namespace osac-infra \
@@ -1170,7 +1257,8 @@ if ! helm template osac-infra "${INFRA_CHART_DIR}" \
     >"${TMP_DIR}/dryrun-env-rendered.yaml" 2>>"${netbox_gate_err}"; then
   fail "dry-run-env-redaction: the osac-infra chart render failed"
 fi
-for leaked in "${env_password}" "${env_session}" "${env_apikey}"; do
+for leaked in "${env_password}" "${env_session}" "${env_apikey}" \
+  "${env_signkey}" "${env_dsn}"; do
   grep -Fq "${leaked}" "${TMP_DIR}/dryrun-env-rendered.yaml" \
     && fail "dry-run-env-redaction: an overlay env value (${leaked}) reached the dry-run output"
 done
@@ -1178,7 +1266,8 @@ done
 grep -q 'name: keycloak-extra-env' "${TMP_DIR}/dryrun-env-rendered.yaml" \
   || fail "dry-run-env-redaction: the extra-env Secret is missing"
 index=0
-for entry in KC_SPI_DEMO_URL KC_SPI_DEMO_SESSION KC_SPI_DEMO_CLIENT; do
+for entry in KC_SPI_DEMO_URL KC_SPI_DEMO_SESSION KC_SPI_DEMO_CLIENT \
+  KC_SPI_DEMO_SIGNING_KEY KC_SPI_DEMO_DATABASE_DSN; do
   grep -A2 "name: \"${entry}\"" "${TMP_DIR}/dryrun-env-rendered.yaml" \
     | grep -q 'secretKeyRef' \
     || fail "dry-run-env-redaction: ${entry} does not reference the extra-env Secret"
@@ -1298,6 +1387,25 @@ grep -Fq '# helm renders comments in env lists' \
   || fail "dry-run-env-comment-redaction: the comment was dropped"
 grep -q 'value: foreground' "${TMP_DIR}/dryrun-env-comment.yaml" \
   || fail "dry-run-env-comment-redaction: output did not resume after the comment"
+
+# Credential-shaped names beyond the keyword list: any *_KEY-suffixed
+# name and DSN/connection-string names often carry raw key material or
+# an embedded password, so they are masked like the keyword names.
+echo "checking dry-run-env-keyname-redaction (key and DSN env values stay out)"
+printf '%s\n' 'kind: Deployment' 'spec:' '  template:' \
+  '    - name: KC_SIGNING_KEY' '      value: deadbeef-signing' \
+  '    - name: DATABASE_DSN' \
+  '      value: postgres://u:pw@db.internal.example.com/db' \
+  '    - name: DATA_CONNECTION_STRING' '      value: connstring-value' \
+  '    - name: APP_MODE' '      value: foreground' \
+  | "${SCRIPT_DIR}/redact-secret-values.sh" >"${TMP_DIR}/dryrun-env-keynames.yaml"
+for leaked in 'deadbeef-signing' 'postgres://u:pw@db.internal.example.com/db' \
+  'connstring-value'; do
+  grep -Fq "${leaked}" "${TMP_DIR}/dryrun-env-keynames.yaml" \
+    && fail "dry-run-env-keyname-redaction: a key/DSN value was kept (${leaked})"
+done
+grep -q 'value: foreground' "${TMP_DIR}/dryrun-env-keynames.yaml" \
+  || fail "dry-run-env-keyname-redaction: a benign value was masked"
 
 # RBAC rules that target Secrets name the Secret in resourceNames, and the
 # name is customer-supplied (netbox.apiTokenSecret carries internal

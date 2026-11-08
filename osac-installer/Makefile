@@ -774,19 +774,33 @@ else
 endif
 	@echo "Installer input validation passed."
 
+.PHONY: validate-osac-inputs
+# The AAP license and the remote API address are static inputs, but they
+# belong to the OSAC install only: `make install` runs install-infra
+# first, whose namespace creation and readiness waits must not happen
+# before a missing license or a non-https remote address is rejected.
+# They are checked here, after the shared gate and before any cluster
+# change, so install-infra alone still requires no license. The
+# REMOTE_KUBECONFIG readability check stays at install time (and in the
+# gate) because the file's permissions can change between validation and
+# install.
+validate-osac-inputs: validate-inputs
+ifneq ($(PLATFORM),kind)
+	@[ -n "$(AAP_LICENSE_FILE)" ] || { echo "ERROR: AAP_LICENSE_FILE is required for PLATFORM=openshift" >&2; exit 1; }
+	@[ -f "$(AAP_LICENSE_FILE)" ] || { echo "ERROR: AAP_LICENSE_FILE not found at $(AAP_LICENSE_FILE)" >&2; exit 1; }
+	@if [ -n "$(REMOTE_API_ADDRESS)" ]; then case "$(REMOTE_API_ADDRESS)" in https://*) ;; *) echo "ERROR: REMOTE_API_ADDRESS must use https://" >&2; exit 1 ;; esac; fi
+endif
+
 .PHONY: install-osac
-install-osac: validate-inputs validate-osac-chart-oci-ref ## Install OSAC instance (PLATFORM= PROFILE= NS= required)
+install-osac: validate-osac-inputs validate-osac-chart-oci-ref ## Install OSAC instance (PLATFORM= PROFILE= NS= required)
 ifndef OSAC_CHART_OCI_REF
 	rm -rf $(OSAC_CHART)/charts
 	helm --repository-config $(LOCAL_HELM_REPOSITORY_CONFIG) dependency build $(OSAC_CHART)
 endif
 ifneq ($(PLATFORM),kind)
-	@[ -n "$(AAP_LICENSE_FILE)" ] || { echo "ERROR: AAP_LICENSE_FILE is required for PLATFORM=openshift" >&2; exit 1; }
-	@[ -f "$(AAP_LICENSE_FILE)" ] || { echo "ERROR: AAP_LICENSE_FILE not found at $(AAP_LICENSE_FILE)" >&2; exit 1; }
 	oc create namespace $(NS) --dry-run=client -o yaml | oc apply -f -
 	if [ -n "$(REMOTE_KUBECONFIG)" ]; then \
 		test -r "$(REMOTE_KUBECONFIG)" || { echo "ERROR: REMOTE_KUBECONFIG is not readable: $(REMOTE_KUBECONFIG)" >&2; exit 1; }; \
-		if [ -n "$(REMOTE_API_ADDRESS)" ]; then case "$(REMOTE_API_ADDRESS)" in https://*) ;; *) echo "ERROR: REMOTE_API_ADDRESS must use https://" >&2; exit 1 ;; esac; fi; \
 		HUB_KUBECONFIG="$(KUBECONFIG)" \
 		REMOTE_KUBECONFIG="$(REMOTE_KUBECONFIG)" \
 		REMOTE_API_ADDRESS="$(REMOTE_API_ADDRESS)" \
@@ -855,15 +869,15 @@ ifeq ($(DRY_RUN),1)
 install: install-dry-run ## Render full install manifests without cluster changes (DRY_RUN=1)
 else ifeq ($(PROFILE),dev-full)
 ifeq ($(HOST_IS_MAC_ARM),true)
-install: install-infra ## Full ARM64 Mac install: infra + local images + osac + dev stack
+install: validate-osac-inputs install-infra ## Full ARM64 Mac install: infra + local images + osac + dev stack
 	$(MAKE) kind-build-load-images PLATFORM=kind PROFILE=dev-full NS=$(NS) KIND_CLUSTER_NAME=$(KIND_CLUSTER_NAME) CONTAINER_TOOL=$(CONTAINER_TOOL)
 	$(MAKE) install-osac PLATFORM=kind PROFILE=dev-full NS=$(NS) KIND_CLUSTER_NAME=$(KIND_CLUSTER_NAME) CONTAINER_TOOL=$(CONTAINER_TOOL)
 	$(MAKE) install-devstack PLATFORM=kind PROFILE=dev-full NS=$(NS) KIND_CLUSTER_NAME=$(KIND_CLUSTER_NAME) CONTAINER_TOOL=$(CONTAINER_TOOL)
 else
-install: install-infra install-osac install-devstack ## Full install: infra + osac (+ dev stack for dev-full)
+install: validate-osac-inputs install-infra install-osac install-devstack ## Full install: infra + osac (+ dev stack for dev-full)
 endif
 else
-install: install-infra install-osac ## Full install: infra + osac (PLATFORM= PROFILE= required)
+install: validate-osac-inputs install-infra install-osac ## Full install: infra + osac (PLATFORM= PROFILE= required)
 endif
 
 .PHONY: install-dry-run
