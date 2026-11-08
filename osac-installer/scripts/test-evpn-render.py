@@ -504,12 +504,14 @@ def test_validation_errors_do_not_log_node_names() -> None:
     # index. peerAddress must be IPv4 to pass the chart schema, so the render
     # reaches the template's own duplicate checks.
     node_hostname = "worker-0.internal.example.com"
+    second_hostname = "worker-1.internal.example.com"
     peer_ip = "10.11.12.1"
+    second_peer_ip = "10.11.12.2"
     vtep_ip = "10.200.255.1"
     duplicate_name = base_values(
         [
             node(node_hostname, "10.200.255.1", [uplink("ens6", peer_ip)]),
-            node(node_hostname, "10.200.255.2", [uplink("ens7", "10.11.12.2")]),
+            node(node_hostname, "10.200.255.2", [uplink("ens7", second_peer_ip)]),
         ]
     )
     duplicate_peer = base_values(
@@ -524,11 +526,7 @@ def test_validation_errors_do_not_log_node_names() -> None:
     duplicate_vtep = base_values(
         [
             node(node_hostname, vtep_ip, [uplink("ens6", peer_ip)]),
-            node(
-                "worker-1.internal.example.com",
-                vtep_ip,
-                [uplink("ens7", "10.11.12.2")],
-            ),
+            node(second_hostname, vtep_ip, [uplink("ens7", second_peer_ip)]),
         ]
     )
     with tempfile.TemporaryDirectory(prefix="evpn-nolog-") as temp:
@@ -546,8 +544,14 @@ def test_validation_errors_do_not_log_node_names() -> None:
             assert node_hostname not in result.stderr, (
                 f"{name}: the failure logged the node name"
             )
+            assert second_hostname not in result.stderr, (
+                f"{name}: the failure logged the second node's name"
+            )
             assert peer_ip not in result.stderr, (
                 f"{name}: the failure logged the peer address"
+            )
+            assert second_peer_ip not in result.stderr, (
+                f"{name}: the failure logged the second node's peer address"
             )
             assert vtep_ip not in result.stderr, (
                 f"{name}: the failure logged the VTEP address"

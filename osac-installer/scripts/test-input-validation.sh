@@ -1147,10 +1147,11 @@ printf '%s\n' 'kind: Deployment' 'spec:' '  template:' \
   '    - name: APP_PASSWORD' "      value: ${env_password}-direct" \
   '    - name: AWS_ACCESS_KEY_ID' "      value: ${env_apikey}-aws" \
   '    - name: DOCKER_AUTH_CONFIG' "      value: ${env_password}-docker" \
+  '    - name: "KAFKA_BROKERS"' "      value: ${env_password}-kafka" \
   '    - name: APP_MODE' '      value: foreground' \
   | "${SCRIPT_DIR}/redact-secret-values.sh" >"${TMP_DIR}/dryrun-env-direct.yaml"
 for leaked in "${env_password}-direct" "${env_apikey}-aws" \
-  "${env_password}-docker"; do
+  "${env_password}-docker" "${env_password}-kafka"; do
   grep -Fq "${leaked}" "${TMP_DIR}/dryrun-env-direct.yaml" \
     && fail "dry-run-env-redaction: the redactor kept a credential env value (${leaked})"
 done

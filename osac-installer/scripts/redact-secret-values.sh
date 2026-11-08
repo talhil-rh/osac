@@ -82,6 +82,11 @@ endpoint_configmap && /^data:$/ { in_payload = 1; print; next }
     if ($0 ~ /^[[:space:]]*- name: .+/) {
         env_name = $0
         sub(/^[[:space:]]*- name: */, "", env_name)
+        # Helm quotes env names only when needed, but the redactor runs
+        # over whole manifests, so a quoted name must match too: strip
+        # the YAML double quotes before the exact KAFKA_BROKERS compare
+        # (the regex checks are substring-based and quote-agnostic).
+        gsub(/"/, "", env_name)
         env_await_value = 1
     }
     if (in_payload) {
