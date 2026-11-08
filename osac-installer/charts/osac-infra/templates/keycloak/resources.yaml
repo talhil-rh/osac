@@ -379,6 +379,14 @@ spec:
     metadata:
       labels:
         app: keycloak-service
+      {{- if .Values.keycloak.extraEnv }}
+      annotations:
+        # The extra env values are read from the keycloak-extra-env Secret,
+        # and Kubernetes does not refresh Secret-backed env entries in a
+        # running container: the checksum rolls the pod when a value
+        # changes, restoring the inline-env upgrade behavior.
+        checksum/extra-env: {{ .Values.keycloak.extraEnv | toJson | sha256sum }}
+      {{- end }}
     spec:
       serviceAccountName: keycloak-service
       volumes:

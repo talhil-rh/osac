@@ -9,11 +9,11 @@
 # instead of the parallel Secret) and the EVPN fabric config map
 # (`osac-infra-evpn-config`, carrying internal node hostnames and fabric
 # peer addresses); and container env entry values whose variable name is
-# credential-shaped (PASSWORD/SECRET/TOKEN/ACCESS_KEY/AUTH/...), which
-# callers can inject into workload specs as plain text instead of Secret
-# references. Resource structure, Secret/ConfigMap names and keys, and
-# every other value stay readable so the dry run remains useful for
-# review.
+# credential-shaped (PASSWORD/SECRET/TOKEN/ACCESS_KEY/AUTH/...) or
+# endpoint-shaped (URL/HOST/ADDR/...), which callers can inject into
+# workload specs as plain text instead of Secret references. Resource
+# structure, Secret/ConfigMap names and keys, and every other value stay
+# readable so the dry run remains useful for review.
 set -euo pipefail
 
 # Helm renders each resource as a top-level document: kind and the data /
@@ -41,8 +41,9 @@ endpoint_configmap && /^data:$/ { in_payload = 1; print; next }
 {
     if (env_await_value) {
         env_await_value = 0
-        if ($0 ~ /^[[:space:]]+value: ./ && tolower(env_name) ~ \
-            /(password|passwd|passphrase|secret|token|credential|api_key|private_key|access_key|auth|session)/) {
+        if ($0 ~ /^[[:space:]]+value: ./ && (tolower(env_name) ~ \
+            /(password|passwd|passphrase|secret|token|credential|api_key|private_key|access_key|auth|session)/ \
+            || tolower(env_name) ~ /(url|host|endpoint|addr)/)) {
             sub(/value: .*/, "value: <redacted>")
         }
     }

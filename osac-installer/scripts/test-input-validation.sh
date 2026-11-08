@@ -1022,4 +1022,53 @@ done
 grep -q 'value: foreground' "${TMP_DIR}/dryrun-env-direct.yaml" \
   || fail "dry-run-env-redaction: the redactor masked a benign env value"
 
+# The extra-env values live in a Secret, and Kubernetes does not refresh
+# Secret-backed env entries in a running container, so the pod template
+# carries a checksum of extraEnv: changing a value must change the
+# checksum (rolling Keycloak), while an unchanged value must keep it
+# stable across renders.
+echo "checking keycloak-extra-env-checksum (value changes roll the pod)"
+extra_env_checksum() {
+  helm template osac-infra "${INFRA_CHART_DIR}" \
+    --namespace osac-infra \
+    --values "${INSTALLER_DIR}/values/vmaas-ci/infra.yaml" \
+    -f "$1" 2>/dev/null \
+    | grep 'checksum/extra-env'
+}
+printf 'keycloak:\n  extraEnv:\n    - name: KC_SPI_DEMO_URL\n      value: checksum-first\n' \
+  >"${TMP_DIR}/checksum-a.yaml"
+printf 'keycloak:\n  extraEnv:\n    - name: KC_SPI_DEMO_URL\n      value: checksum-second\n' \
+  >"${TMP_DIR}/checksum-b.yaml"
+checksum_a=$(extra_env_checksum "${TMP_DIR}/checksum-a.yaml") \
+  || fail "keycloak-extra-env-checksum: the osac-infra chart render failed"
+[ -n "${checksum_a}" ] \
+  || fail "keycloak-extra-env-checksum: the pod template carries no extra-env checksum"
+checksum_b=$(extra_env_checksum "${TMP_DIR}/checksum-b.yaml")
+[ "${checksum_a}" != "${checksum_b}" ] \
+  || fail "keycloak-extra-env-checksum: a changed extraEnv value did not change the checksum"
+checksum_a2=$(extra_env_checksum "${TMP_DIR}/checksum-a.yaml")
+[ "${checksum_a}" = "${checksum_a2}" ] \
+  || fail "keycloak-extra-env-checksum: the checksum is not stable across renders"
+
+# Internal endpoint URLs reach the dry run as plain env values too (for
+# example the dev-fixtures Job's MCP_RESOURCE_URL): endpoint-shaped env
+# names are masked like credential-shaped ones.
+echo "checking dry-run-endpoint-env-redaction (internal endpoint env values stay out)"
+mcp_host="mcp-internal-$(date +%s)-$$.internal.example.com"
+printf 'keycloak:\n  devFixtures:\n    enabled: true\n    mcpResourceURL: https://%s/\n' \
+  "${mcp_host}" >"${TMP_DIR}/dryrun-mcp.yaml"
+if ! helm template osac-infra "${INFRA_CHART_DIR}" \
+    --namespace osac-infra \
+    --values "${INSTALLER_DIR}/values/vmaas-ci/infra.yaml" \
+    -f "${TMP_DIR}/dryrun-mcp.yaml" \
+    | "${SCRIPT_DIR}/redact-secret-values.sh" \
+    >"${TMP_DIR}/dryrun-mcp-rendered.yaml" 2>>"${netbox_gate_err}"; then
+  fail "dry-run-endpoint-env-redaction: the osac-infra chart render failed"
+fi
+grep -Fq "${mcp_host}" "${TMP_DIR}/dryrun-mcp-rendered.yaml" \
+  && fail "dry-run-endpoint-env-redaction: an internal endpoint env value reached the dry-run output"
+grep -A1 'name: MCP_RESOURCE_URL' "${TMP_DIR}/dryrun-mcp-rendered.yaml" \
+  | grep -q 'value: <redacted>' \
+  || fail "dry-run-endpoint-env-redaction: the endpoint env value was not masked"
+
 echo "input validation passed"
