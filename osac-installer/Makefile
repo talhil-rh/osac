@@ -642,8 +642,11 @@ endif
 # is retried with this render-only placeholder, which is never passed to an
 # installation -- and only when netbox_seed_check (run in the same recipe
 # line, right before the render) saw this install's infra values deploy the
-# seed hook; without it nothing creates the Secret, so a missing token is a
-# real input error. A token supplied by the caller through any channel
+# seed hook, or when the gate's read-only cluster lookup
+# (netbox_existing_secret_matches in scripts/lib.sh) confirmed the token
+# Secret the chart reads already exists with its key; without either, a
+# missing token is a real input error. A token supplied by the caller
+# through any channel
 # (--set, --set-string, or a values file) renders without the placeholder,
 # so the gate validates the caller's actual value. The placeholder is
 # generated at runtime so no token-shaped literal sits in the tree; every
@@ -744,6 +747,11 @@ else
 		--namespace osac-infra \
 		--values $(INFRA_VALUES) $${INFRA_VALUES_EXTRA} \
 		--set osacNamespace=$(NS) \
+		--set lvms.channel=stable-$(OCP_VERSION) \
+		--set keycloak.hostname=https://keycloak-keycloak.$(DOMAIN) \
+		--set keycloak.route.hostname=keycloak-keycloak.$(DOMAIN) \
+		--set keycloak.uiUrl=https://$(UI_HOSTNAME) \
+		--set "bundledVault.keycloakIssuerUrl=https://keycloak-keycloak.$(DOMAIN)/realms/osac" \
 		$(INFRA_HELM_ARGS) $(OIDC_IDP_CA_HELM_ARGS) && \
 	render_osac_chart_offline "$(NETBOX_OFFLINE_PLACEHOLDER)" \
 		osac $(if $(OSAC_CHART_OCI_REF),$(OSAC_CHART_OCI_REF)$(if $(OSAC_CHART_OCI_VERSION), --version $(OSAC_CHART_OCI_VERSION)),$(OSAC_CHART)) \

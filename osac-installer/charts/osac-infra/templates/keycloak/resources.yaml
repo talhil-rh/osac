@@ -174,7 +174,10 @@ metadata:
 type: Opaque
 stringData:
 {{- range .Values.keycloak.extraEnv }}
-  {{ .name }}: {{ .value | quote }}
+  {{- /* The key is quoted so a name like "on" stays a string: YAML 1.1
+would otherwise coerce it to boolean true and the Deployment's
+secretKeyRef (which quotes the key) would reference a missing key. */}}
+  {{ .name | quote }}: {{ .value | quote }}
 {{- end }}
 {{- end }}
 ---

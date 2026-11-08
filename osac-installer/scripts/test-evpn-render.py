@@ -505,6 +505,7 @@ def test_validation_errors_do_not_log_node_names() -> None:
     # reaches the template's own duplicate checks.
     node_hostname = "worker-0.internal.example.com"
     peer_ip = "10.11.12.1"
+    vtep_ip = "10.200.255.1"
     duplicate_name = base_values(
         [
             node(node_hostname, "10.200.255.1", [uplink("ens6", peer_ip)]),
@@ -520,11 +521,22 @@ def test_validation_errors_do_not_log_node_names() -> None:
             )
         ]
     )
+    duplicate_vtep = base_values(
+        [
+            node(node_hostname, vtep_ip, [uplink("ens6", peer_ip)]),
+            node(
+                "worker-1.internal.example.com",
+                vtep_ip,
+                [uplink("ens7", "10.11.12.2")],
+            ),
+        ]
+    )
     with tempfile.TemporaryDirectory(prefix="evpn-nolog-") as temp:
         directory = pathlib.Path(temp)
         for name, values in (
             ("duplicate-name.yaml", duplicate_name),
             ("duplicate-peer.yaml", duplicate_peer),
+            ("duplicate-vtep.yaml", duplicate_vtep),
         ):
             values_file = write_values(directory, name, values)
             result = render_failure_result(INFRA_CHART, values_file)
@@ -537,7 +549,14 @@ def test_validation_errors_do_not_log_node_names() -> None:
             assert peer_ip not in result.stderr, (
                 f"{name}: the failure logged the peer address"
             )
+            assert vtep_ip not in result.stderr, (
+                f"{name}: the failure logged the VTEP address"
+            )
             assert "duplicate" in result.stderr, f"{name}: no failure message"
+            if name == "duplicate-vtep.yaml":
+                assert "duplicate vtepIP" in result.stderr, (
+                    f"{name}: the failure did not identify the duplicate VTEP"
+                )
 
 
 def main() -> None:

@@ -8,11 +8,14 @@
 # carrying EVPN/Netris controller URLs and any credential misplaced there
 # instead of the parallel Secret), the EVPN fabric config map
 # (`osac-infra-evpn-config`, carrying internal node hostnames and fabric
-# peer addresses), and the MCE image-overrides map
-# (`osac-infra-mce-image-overrides`, carrying registry hostnames in its
-# manifest); container env entry values whose variable name is
+# peer addresses), and the MCE maps (`osac-infra-mce-image-overrides`,
+# carrying registry hostnames in its manifest, and
+# `osac-infra-mce-config`, carrying internal OS image mirror URLs in its
+# osImages); container env entry values whose variable name is
 # credential-shaped (PASSWORD/SECRET/TOKEN/ACCESS_KEY/AUTH/...) or
-# endpoint-shaped (URL/HOST/ADDR/...), which callers can inject into
+# endpoint-shaped (URL/HOST/ADDR/..., plus Kafka broker lists such as
+# KAFKA_BROKERS, whose metering value carries internal broker hosts),
+# which callers can inject into
 # workload specs as plain text instead of Secret references; and the
 # registry host of image references that do not point at a well-known
 # public registry, since image overrides carry internal registry
@@ -36,7 +39,8 @@ awk '
 !in_payload && /^  name: / {
     if (kind == "ConfigMap" \
         && ($2 ~ /-ig$/ || $2 == "osac-infra-evpn-config" \
-            || $2 == "osac-infra-mce-image-overrides")) {
+            || $2 == "osac-infra-mce-image-overrides" \
+            || $2 == "osac-infra-mce-config")) {
         endpoint_configmap = 1
     }
     print; next
@@ -70,7 +74,8 @@ endpoint_configmap && /^data:$/ { in_payload = 1; print; next }
         env_await_value = 0
         if ($0 ~ /^[[:space:]]+value: ./ && (tolower(env_name) ~ \
             /(password|passwd|passphrase|secret|token|credential|api_key|private_key|access_key|auth|session)/ \
-            || tolower(env_name) ~ /(url|host|endpoint|addr)/)) {
+            || tolower(env_name) ~ /(url|host|endpoint|addr)/ \
+            || tolower(env_name) == "kafka_brokers")) {
             sub(/value: .*/, "value: <redacted>")
         }
     }

@@ -81,20 +81,29 @@ validate_namespace() {
 # returns nil offline), so a profile relying on the install-time
 # netbox-token-seed hook to create the token Secret fails the render with a
 # specific "tokenValue is required" error. Only that failure is retried with
-# a render-only placeholder token (never passed to an installation), and
-# only when netbox_seed_check (same shell) exported NETBOX_TOKEN_SEEDED=1:
-# without the seed hook nothing creates the Secret, so the missing token is
-# a real input error the install would hit only after the cluster changed.
-# The bridge is legitimate only when the seed hook's Secret identity --
-# name, namespace, and key, recorded by netbox_seed_check from the rendered
-# hook -- matches the Secret the osac chart reads: a caller override that
-# diverges (for example bmf.netbox.tokenSecretKey) would pass a bridged
-# render yet fail the real install only after install-infra changed the
-# cluster, so a mismatch fails the gate instead. Every other failure --
-# including a caller-supplied token that violates the schema, however it
-# was supplied (--set, --set-string, or a values file) -- aborts with
-# Helm's own error, so the gate always validates the caller's actual
-# merged value, never a placeholder masking it.
+# a render-only placeholder token (never passed to an installation). Two
+# bridges exist, and each is legitimate only under a verified condition:
+#
+# Seeded (netbox_seed_check, same shell, exported NETBOX_TOKEN_SEEDED=1):
+# the seed hook creates the token Secret during install-infra, before
+# install-osac renders. The bridge holds only when the seed hook's Secret
+# identity -- name, namespace, and key, recorded by netbox_seed_check from
+# the rendered hook -- matches the Secret the osac chart reads: a caller
+# override that diverges (for example bmf.netbox.tokenSecretKey) would
+# pass a bridged render yet fail the real install only after
+# install-infra changed the cluster, so a mismatch fails the gate instead.
+#
+# Pre-existing (not seeded): the token Secret can already exist in the
+# cluster -- created by a prior install or an operator -- and helm upgrade
+# reads it through lookup at install time even though helm template
+# cannot. netbox_existing_secret_matches verifies the Secret the osac
+# chart reads, with its key, through a read-only cluster lookup; a missing
+# Secret or key stays a real input error that fails the gate.
+#
+# Every other failure -- including a caller-supplied token that violates
+# the schema, however it was supplied (--set, --set-string, or a values
+# file) -- aborts with Helm's own error, so the gate always validates the
+# caller's actual merged value, never a placeholder masking it.
 #
 # Usage: render_osac_chart_offline PLACEHOLDER_TOKEN RELEASE CHART [HELM_ARGS...]
 render_osac_chart_offline() {
@@ -106,19 +115,25 @@ render_osac_chart_offline() {
     fi
     case "${err}" in
         *"netbox.tokenValue is required when Secret"*)
-            if [ "${NETBOX_TOKEN_SEEDED:-0}" = "1" ]; then
-                bridged_err_file=$(mktemp)
-                if bridged=$(helm template "$@" \
-                    --set "bmf.netbox.tokenValue=${placeholder_token}" \
-                    2>"${bridged_err_file}"); then
-                    rm -f "${bridged_err_file}"
-                    netbox_seed_identity_matches "${bridged}" "${placeholder_token}"
-                    return
-                fi
+            bridged_err_file=$(mktemp)
+            if ! bridged=$(helm template "$@" \
+                --set "bmf.netbox.tokenValue=${placeholder_token}" \
+                2>"${bridged_err_file}"); then
                 cat "${bridged_err_file}" >&2
                 rm -f "${bridged_err_file}"
                 return 1
             fi
+            rm -f "${bridged_err_file}"
+            if [ "${NETBOX_TOKEN_SEEDED:-0}" = "1" ]; then
+                netbox_seed_identity_matches "${bridged}" "${placeholder_token}"
+                return
+            fi
+            if ! netbox_existing_secret_matches "${bridged}" \
+                "${placeholder_token}"; then
+                printf '%s\n' "${err}" >&2
+                return 1
+            fi
+            return 0
             ;;
     esac
     printf '%s\n' "${err}" >&2
@@ -126,17 +141,14 @@ render_osac_chart_offline() {
 }
 
 # Extract the NetBox token Secret identity the osac chart renders for the
-# bridged placeholder token -- the Secret whose stringData carries the
+# bridged placeholder token: the Secret whose stringData carries the
 # placeholder is the one the bmf subchart creates from
-# bmf.secrets.netboxToken / bmf.netbox.tokenSecretKey -- and compare it
-# with the seed hook's identity exported by netbox_seed_check. Any
-# mismatch fails the gate before a cluster change; the message names both
-# identities so the caller can see which override diverged.
-# Usage: netbox_seed_identity_matches RENDER PLACEHOLDER_TOKEN
-netbox_seed_identity_matches() {
+# bmf.secrets.netboxToken / bmf.netbox.tokenSecretKey. Prints the name,
+# namespace, and key, one per line.
+# Usage: netbox_render_secret_identity RENDER PLACEHOLDER_TOKEN
+netbox_render_secret_identity() {
     local render="$1" placeholder="$2"
-    local identity bmf_name bmf_ns bmf_key
-    identity=$(printf '%s\n' "${render}" | awk -v ph="${placeholder}" '
+    printf '%s\n' "${render}" | awk -v ph="${placeholder}" '
         /^---$/ { kind = ""; name = ""; ns = ""; next }
         /^kind: / { kind = $2 }
         /^  name: / { if (name == "") name = $2 }
@@ -151,7 +163,54 @@ netbox_seed_identity_matches() {
             print ns
             print key
             done = 1
-        }')
+        }'
+}
+
+# Verify read-only, against the cluster, that the NetBox token Secret the
+# osac chart reads already exists with the right key: with no seed hook,
+# the token can only come from a Secret created outside this install
+# (which `helm upgrade` reads through lookup even though `helm template`
+# cannot). The lookup prints no Secret content -- only whether the key
+# exists -- so the gate accepts exactly the installs that would succeed
+# and still rejects a missing Secret or key before any cluster change.
+# The identity fields are restricted to a safe charset because they are
+# interpolated into the kubectl go-template; anything else cannot be
+# verified safely, so it fails closed with the underlying token error.
+# Tries kubectl, then oc; with neither available, or no reachable
+# cluster, the lookup fails closed the same way.
+# Usage: netbox_existing_secret_matches RENDER PLACEHOLDER_TOKEN
+netbox_existing_secret_matches() {
+    local render="$1" placeholder="$2"
+    local identity name ns key cli out
+    identity=$(netbox_render_secret_identity "${render}" "${placeholder}")
+    name=$(printf '%s\n' "${identity}" | sed -n 1p)
+    ns=$(printf '%s\n' "${identity}" | sed -n 2p)
+    key=$(printf '%s\n' "${identity}" | sed -n 3p)
+    [ -n "${name}" ] && [ -n "${ns}" ] && [ -n "${key}" ] || return 1
+    case "${name}${ns}${key}" in
+        *[!A-Za-z0-9._-]*) return 1 ;;
+    esac
+    for cli in kubectl oc; do
+        command -v "${cli}" >/dev/null 2>&1 || continue
+        if out=$("${cli}" get secret "${name}" -n "${ns}" \
+            -o go-template="{{if index .data \"${key}\"}}present{{end}}" \
+            2>/dev/null); then
+            [ "${out}" = "present" ]
+            return
+        fi
+    done
+    return 1
+}
+
+# Compare the NetBox token Secret identity the osac chart renders with the
+# seed hook's identity exported by netbox_seed_check. Any mismatch fails
+# the gate before a cluster change; the message names both identities so
+# the caller can see which override diverged.
+# Usage: netbox_seed_identity_matches RENDER PLACEHOLDER_TOKEN
+netbox_seed_identity_matches() {
+    local render="$1" placeholder="$2"
+    local identity bmf_name bmf_ns bmf_key
+    identity=$(netbox_render_secret_identity "${render}" "${placeholder}")
     bmf_name=$(printf '%s\n' "${identity}" | sed -n 1p)
     bmf_ns=$(printf '%s\n' "${identity}" | sed -n 2p)
     bmf_key=$(printf '%s\n' "${identity}" | sed -n 3p)

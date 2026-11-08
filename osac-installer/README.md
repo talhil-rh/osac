@@ -195,16 +195,18 @@ the terminal with Secret payload values (`data`/`stringData`, including
 multi-line block scalars such as PEM keys), container env entry values
 whose variable name is credential-shaped (access keys, registry auth
 config, passwords, tokens) or endpoint-shaped (URLs, hosts, internal
-endpoints such as the dev-fixtures MCP resource URL), the registry host
+endpoints such as the dev-fixtures MCP resource URL, and Kafka broker
+lists such as `KAFKA_BROKERS`), the registry host
 of image references that do not point at a well-known public registry
 (image overrides carry internal registry hostnames; the repository and
 tag stay readable), and the AAP
 instance-group endpoint config (the AAP instance-group ConfigMaps named
 `*-ig`, which carry EVPN/Netris controller URLs from values overlays, the
 `osac-infra-evpn-config` ConfigMap, which carries internal node
-hostnames and fabric peer addresses, and the
-`osac-infra-mce-image-overrides` ConfigMap, which carries MCE image
-override registry hostnames) redacted by
+hostnames and fabric peer addresses, and the MCE ConfigMaps
+`osac-infra-mce-image-overrides` and `osac-infra-mce-config`, which
+carry MCE image override registry hostnames and internal OS image mirror
+URLs) redacted by
 `scripts/redact-secret-values.sh`, so credentials and internal hostnames
 supplied through values overlays do not reach the terminal or CI logs.
 The `helm` commands themselves are not echoed, so an inline `--set`

@@ -530,6 +530,25 @@ join_continuations <"${remote_plan}" | grep 'render_osac_chart_offline' \
 join_continuations <"${remote_plan}" | grep 'netbox_seed_check osac-infra' \
   | grep -q 'render_osac_chart_offline' \
   || fail "validate-inputs: the gate must run netbox_seed_check before the bridged render"
+# The seed-check render must apply the same cluster-specific overrides as
+# the gate's own osac-infra render (and install-infra's upgrade): an
+# overlay value the install overrides on the command line -- for example
+# an empty bundledVault.keycloakIssuerUrl filled in with the cluster
+# domain -- must not fail the seed check alone, which would silently
+# disable the token bridge and reject a valid seeded install with a
+# misleading missing-token error. Make expands the cluster lookups into
+# the printed recipe (the stubbed oc answers 4.22.14 and
+# apps.example.com), so the expected values are the expanded ones.
+for seed_override in \
+  '--set lvms.channel=stable-4.22' \
+  '--set keycloak.hostname=https://keycloak-keycloak.apps.example.com' \
+  '--set keycloak.route.hostname=keycloak-keycloak.apps.example.com' \
+  '--set keycloak.uiUrl=https://osac-ui-osac.apps.example.com' \
+  '--set "bundledVault.keycloakIssuerUrl=https://keycloak-keycloak.apps.example.com/realms/osac"'; do
+  join_continuations <"${remote_plan}" | grep 'netbox_seed_check osac-infra' \
+    | grep -Fq -- "${seed_override}" \
+    || fail "validate-inputs: the seed-check render omits ${seed_override}"
+done
 
 # install-devstack rejects a wrong profile at parse time, before the gate's
 # cluster lookups or renders, so the user sees the actual mistake.
@@ -714,6 +733,34 @@ netbox_gate_err="${TMP_DIR}/netbox-gate.err"
 # no token-shaped literal sits in the script.
 offline_token="offline-validation-placeholder-$(date +%s)-$$"
 
+# The unseeded bridge path (a pre-existing token Secret) is tested
+# hermetically: stub CLIs stand in for the cluster lookup, so no developer
+# cluster or login state can flip the result. The kubectl stub logs every
+# invocation and answers "present" only for the exact Secret identity and
+# key the lookup asks for; the oc stub never answers, so the kubectl path
+# is what runs (lib.sh falls back to oc only when kubectl is unavailable).
+netbox_cli_bin="${TMP_DIR}/netbox-cli"
+mkdir -p "${netbox_cli_bin}"
+netbox_cli_log="${TMP_DIR}/netbox-cli.log"
+cat >"${netbox_cli_bin}/kubectl" <<'STUB'
+#!/usr/bin/env bash
+printf 'kubectl %s\n' "$*" >>"${NETBOX_CLI_LOG}"
+[ "${NETBOX_CLI_SECRET_PRESENT:-0}" = "1" ] || exit 0
+[ "$1 $2 $3 $4 $5" = "get secret ${NETBOX_CLI_NAME} -n ${NETBOX_CLI_NS}" ] || exit 0
+for arg in "$@"; do
+  case "${arg}" in
+    *"index .data \"${NETBOX_CLI_KEY}\""*) echo present; exit 0 ;;
+  esac
+done
+exit 0
+STUB
+cat >"${netbox_cli_bin}/oc" <<'STUB'
+#!/usr/bin/env bash
+printf 'oc %s\n' "$*" >>"${NETBOX_CLI_LOG}"
+exit 1
+STUB
+chmod +x "${netbox_cli_bin}/kubectl" "${netbox_cli_bin}/oc"
+
 # netbox_seed_check decides whether the bridge is legitimate at all: the
 # netbox profile's infra values deploy the seed hook, bmaas-ci's do not.
 echo "checking netbox-seed-hook-present (the netbox profile's infra deploys it)"
@@ -787,18 +834,65 @@ grep -Fq 'osac chart reads Secret other-token/' "${netbox_gate_err}" \
   || fail "netbox-name-mismatch: the failure did not name the divergent Secret name"
 
 # Without the seed hook nothing creates the token Secret, so the same
-# lookup failure is a real input error: the bridge must not paper over it,
+# lookup failure is a real input error unless the Secret already exists in
+# the cluster: the bridge must not paper over a genuinely missing token,
 # or the gate would pass an install that fails only after install-infra
-# changed the cluster.
-echo "checking netbox-unseeded-bridge (no seed hook: the token error is real)"
-if NETBOX_TOKEN_SEEDED=0 render_osac_chart_offline "${offline_token}" \
+# changed the cluster. The stub CLIs answer nothing here (no Secret).
+echo "checking netbox-unseeded-bridge (no seed hook and no Secret: the token error is real)"
+if PATH="${netbox_cli_bin}:${PATH}" NETBOX_CLI_LOG="${netbox_cli_log}" \
+    NETBOX_TOKEN_SEEDED=0 render_osac_chart_offline "${offline_token}" \
     osac "${OSAC_CHART_DIR}" --values "${OSAC_CHART_DIR}/ci/default-values.yaml" \
+    --namespace osac \
     "${NETBOX_PROFILE_ARGS[@]}" \
     2>"${netbox_gate_err}"; then
   fail "netbox-unseeded-bridge: the gate bridged a missing token with no seed hook"
 fi
 grep -Eiq 'netbox\.tokenValue is required when Secret' "${netbox_gate_err}" \
   || fail "netbox-unseeded-bridge: the failure did not name the missing token"
+
+# A token Secret that already exists in the cluster is the other
+# legitimate unseeded source: `helm upgrade` reads it through lookup at
+# install time even though `helm template` cannot see it offline, so the
+# gate verifies it with a read-only cluster lookup instead of rejecting a
+# valid install. The stub answers only for the exact identity the chart
+# renders (netbox-api-token in osac, key token), proving the lookup uses
+# the effective values, and the log proves it is read-only.
+echo "checking netbox-existing-secret (a pre-existing token Secret passes the gate)"
+: >"${netbox_cli_log}"
+if ! PATH="${netbox_cli_bin}:${PATH}" NETBOX_CLI_LOG="${netbox_cli_log}" \
+    NETBOX_CLI_SECRET_PRESENT=1 NETBOX_CLI_NAME=netbox-api-token \
+    NETBOX_CLI_NS=osac NETBOX_CLI_KEY=token NETBOX_TOKEN_SEEDED=0 \
+    render_osac_chart_offline "${offline_token}" \
+    osac "${OSAC_CHART_DIR}" --values "${OSAC_CHART_DIR}/ci/default-values.yaml" \
+    --namespace osac \
+    "${NETBOX_PROFILE_ARGS[@]}" \
+    2>"${netbox_gate_err}"; then
+  fail "netbox-existing-secret: the gate rejected an install whose token Secret exists"
+fi
+grep -q 'kubectl get secret netbox-api-token -n osac' "${netbox_cli_log}" \
+  || fail "netbox-existing-secret: the lookup did not use the rendered Secret identity"
+grep -q -- '-o go-template' "${netbox_cli_log}" \
+  || fail "netbox-existing-secret: the lookup was not the read-only template check"
+grep -Eq 'kubectl (apply|create|delete|patch|replace|edit)' "${netbox_cli_log}" \
+  && fail "netbox-existing-secret: the gate mutated the cluster"
+
+# A Secret that exists under a different key than the chart reads is still
+# a real input error: the caller overrode bmf.netbox.tokenSecretKey, so
+# the lookup asks for that key and nothing answers.
+echo "checking netbox-existing-secret-wrong-key (a Secret missing the chart's key fails)"
+if PATH="${netbox_cli_bin}:${PATH}" NETBOX_CLI_LOG="${netbox_cli_log}" \
+    NETBOX_CLI_SECRET_PRESENT=1 NETBOX_CLI_NAME=netbox-api-token \
+    NETBOX_CLI_NS=osac NETBOX_CLI_KEY=token NETBOX_TOKEN_SEEDED=0 \
+    render_osac_chart_offline "${offline_token}" \
+    osac "${OSAC_CHART_DIR}" --values "${OSAC_CHART_DIR}/ci/default-values.yaml" \
+    --namespace osac \
+    "${NETBOX_PROFILE_ARGS[@]}" \
+    --set bmf.netbox.tokenSecretKey=api-token \
+    2>"${netbox_gate_err}"; then
+  fail "netbox-existing-secret-wrong-key: the gate bridged a Secret without the chart's key"
+fi
+grep -Eiq 'netbox\.tokenValue is required when Secret' "${netbox_gate_err}" \
+  || fail "netbox-existing-secret-wrong-key: the failure did not name the missing token"
 
 # A caller-supplied token must reach the gate's render, never be masked by
 # the placeholder: the placeholder applies only when the merged render has
@@ -1022,9 +1116,24 @@ for entry in KC_SPI_DEMO_URL KC_SPI_DEMO_SESSION KC_SPI_DEMO_CLIENT; do
   grep -A2 "name: \"${entry}\"" "${TMP_DIR}/dryrun-env-rendered.yaml" \
     | grep -q 'secretKeyRef' \
     || fail "dry-run-env-redaction: ${entry} does not reference the extra-env Secret"
-  grep -q "${entry}: <redacted>" "${TMP_DIR}/dryrun-env-rendered.yaml" \
+  grep -Fq "\"${entry}\": <redacted>" "${TMP_DIR}/dryrun-env-rendered.yaml" \
     || fail "dry-run-env-redaction: the ${entry} payload was not masked"
 done
+# The Secret keys are quoted: YAML 1.1 coerces an unquoted boolean-like
+# key such as `on` to true, which would not match the Deployment's
+# secretKeyRef key and break the pod at startup.
+printf 'keycloak:\n  extraEnv:\n    - name: "on"\n      value: bool-name-check\n' \
+  >"${TMP_DIR}/dryrun-env-on.yaml"
+if ! helm template osac-infra "${INFRA_CHART_DIR}" \
+    --namespace osac-infra \
+    --values "${INSTALLER_DIR}/values/vmaas-ci/infra.yaml" \
+    -f "${TMP_DIR}/dryrun-env-on.yaml" \
+    | "${SCRIPT_DIR}/redact-secret-values.sh" \
+    >"${TMP_DIR}/dryrun-env-on-rendered.yaml" 2>>"${netbox_gate_err}"; then
+  fail "dry-run-env-redaction: the boolean-named extra-env render failed"
+fi
+grep -Fq '"on": <redacted>' "${TMP_DIR}/dryrun-env-on-rendered.yaml" \
+  || fail "dry-run-env-redaction: the boolean-named Secret key is not quoted"
 grep -A1 'name: KC_SPI_IMPORT_REALM_FILE_STRATEGY' \
   "${TMP_DIR}/dryrun-env-rendered.yaml" \
   | grep -q 'value: OVERWRITE' \
@@ -1106,6 +1215,34 @@ grep -A1 'name: MCP_RESOURCE_URL' "${TMP_DIR}/dryrun-mcp-rendered.yaml" \
   | grep -q 'value: <redacted>' \
   || fail "dry-run-endpoint-env-redaction: the endpoint env value was not masked"
 
+# Kafka broker lists are endpoint data too: an overlay setting
+# metering.kafka.brokers reaches the metering Deployment and its adapters
+# as the KAFKA_BROKERS env value, whose name matches neither the
+# credential-shaped nor the endpoint-shaped patterns, so it is matched
+# explicitly. The render carries a runtime-generated NetBox token (masked
+# as a Secret payload) because the profile enables NetBox.
+echo "checking dry-run-kafka-brokers-redaction (internal broker hosts stay out)"
+kafka_host="kafka-bootstrap-internal-$(date +%s)-$$.internal.example.com"
+kafka_token="kafka-render-token-$(date +%s)-$$"
+printf 'bmf:\n  netbox:\n    tokenValue: %s\n' "${kafka_token}" \
+  >"${TMP_DIR}/dryrun-kafka-token.yaml"
+if ! helm template dryrun-osac "${OSAC_CHART_DIR}" \
+    --values "${OSAC_CHART_DIR}/ci/default-values.yaml" \
+    --namespace osac \
+    "${NETBOX_PROFILE_ARGS[@]}" \
+    -f "${TMP_DIR}/dryrun-kafka-token.yaml" \
+    --set "metering.kafka.brokers=${kafka_host}:9093" \
+    | "${SCRIPT_DIR}/redact-secret-values.sh" \
+    >"${TMP_DIR}/dryrun-kafka-rendered.yaml" 2>>"${netbox_gate_err}"; then
+  fail "dry-run-kafka-brokers-redaction: the osac chart render failed"
+fi
+grep -Fq "${kafka_host}" "${TMP_DIR}/dryrun-kafka-rendered.yaml" \
+  && fail "dry-run-kafka-brokers-redaction: an internal broker host reached the dry-run output"
+kafka_masked=$(grep -A1 'name: KAFKA_BROKERS' "${TMP_DIR}/dryrun-kafka-rendered.yaml" \
+  | grep -c 'value: <redacted>')
+[ "${kafka_masked}" -ge 2 ] \
+  || fail "dry-run-kafka-brokers-redaction: a KAFKA_BROKERS value was not masked (${kafka_masked}/2)"
+
 # Image overrides carry the internal registry hostname into every image
 # reference the dry run prints. The registry host is masked unless it is
 # a well-known public registry, so the repository and tag stay readable
@@ -1162,5 +1299,35 @@ grep -q 'name: osac-infra-mce-image-overrides' "${TMP_DIR}/dryrun-mce-rendered.y
   || fail "dry-run-mce-registry-redaction: the MCE overrides ConfigMap is missing"
 grep -q 'manifest.json: <redacted>' "${TMP_DIR}/dryrun-mce-rendered.yaml" \
   || fail "dry-run-mce-registry-redaction: the overrides manifest was not masked"
+
+# The MCE AgentServiceConfig map (osac-infra-mce-config) carries the
+# osImages list, whose URLs point at internal OS image mirrors; the dry
+# run must mask it like the other endpoint-config ConfigMaps, keeping the
+# ConfigMap name readable.
+echo "checking dry-run-mce-config-redaction (MCE osImages mirror URLs stay out)"
+mce_mirror="mirror-internal-$(date +%s)-$$.internal.example.com"
+cat >"${TMP_DIR}/dryrun-mce-config.yaml" <<MCE_EOF
+mce:
+  enabled: true
+  osImages:
+    - openshiftVersion: "4.22"
+      version: "9.8.20260428-0"
+      url: https://${mce_mirror}/rhcos-4.22-live.x86_64.iso
+      cpuArchitecture: "x86_64"
+MCE_EOF
+if ! helm template osac-infra "${INFRA_CHART_DIR}" \
+    --namespace osac-infra \
+    --values "${INSTALLER_DIR}/values/vmaas-ci/infra.yaml" \
+    -f "${TMP_DIR}/dryrun-mce-config.yaml" \
+    | "${SCRIPT_DIR}/redact-secret-values.sh" \
+    >"${TMP_DIR}/dryrun-mce-config-rendered.yaml" 2>>"${netbox_gate_err}"; then
+  fail "dry-run-mce-config-redaction: the osac-infra chart render failed"
+fi
+grep -Fq "${mce_mirror}" "${TMP_DIR}/dryrun-mce-config-rendered.yaml" \
+  && fail "dry-run-mce-config-redaction: an internal mirror URL reached the dry-run output"
+grep -q 'name: osac-infra-mce-config' "${TMP_DIR}/dryrun-mce-config-rendered.yaml" \
+  || fail "dry-run-mce-config-redaction: the MCE config ConfigMap is missing"
+grep -q 'config.yaml: <redacted>' "${TMP_DIR}/dryrun-mce-config-rendered.yaml" \
+  || fail "dry-run-mce-config-redaction: the osImages config was not masked"
 
 echo "input validation passed"
