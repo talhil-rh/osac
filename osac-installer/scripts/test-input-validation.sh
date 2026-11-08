@@ -522,6 +522,7 @@ if MOCK_LOG="${LOG}" PATH="${STUB_BIN}:${PATH}" \
 fi
 grep -q 'REMOTE_KUBECONFIG_SECRET_NAME must be a DNS subdomain' "${TMP_DIR}/remote-inj.err" \
   || fail "remote-injection: the value did not reach the validator as a literal"
+assert_prevalidation_commands remote-injection
 
 # The AAP license is a static input to the OSAC install only: `make
 # install` composes install-infra before install-osac, so a missing
@@ -562,7 +563,7 @@ grep -q 'REMOTE_API_ADDRESS must use https' "${TMP_DIR}/addr-bad.err" \
 if grep -Eq "${mutation_commands}" "${LOG}"; then
   fail "remote-address-scheme: a cluster mutation ran before the address check"
 fi
-assert_prevalidation_commands remote-injection
+assert_prevalidation_commands remote-address-scheme
 
 # The gate's osac-chart render and install-osac's upgrade share the same
 # remote-cluster kubeconfig argument construction (REMOTE_CLUSTER_HELM_ARGS),
