@@ -946,4 +946,49 @@ grep -q 'name: osac-infra-evpn-config' "${TMP_DIR}/dryrun-evpn-fabric-rendered.y
 grep -q 'nodes.txt: <redacted>' "${TMP_DIR}/dryrun-evpn-fabric-rendered.yaml" \
   || fail "dry-run-evpn-fabric-redaction: the node list was not masked"
 
+# Container env entries are a plain-text channel for credentials: callers
+# can inject passwords into workload specs through values overlays (for
+# example keycloak.extraEnv) instead of Secret references, and Helm
+# renders them as `value:` lines in the Deployment. The dry run must mask
+# env values whose variable name is credential-shaped, while ordinary
+# configuration env values stay readable for review.
+echo "checking dry-run-env-redaction (overlay env passwords stay out)"
+env_token="env-token-$(date +%s)-$$"
+cat >"${TMP_DIR}/dryrun-env-token.yaml" <<ENV_EOF
+keycloak:
+  extraEnv:
+    - name: KC_SPI_DEMO_CREDENTIAL
+      value: ${env_token}
+ENV_EOF
+if ! helm template osac-infra "${INFRA_CHART_DIR}" \
+    --namespace osac-infra \
+    --values "${INSTALLER_DIR}/values/vmaas-ci/infra.yaml" \
+    -f "${TMP_DIR}/dryrun-env-token.yaml" \
+    | "${SCRIPT_DIR}/redact-secret-values.sh" \
+    >"${TMP_DIR}/dryrun-env-rendered.yaml" 2>>"${netbox_gate_err}"; then
+  fail "dry-run-env-redaction: the osac-infra chart render failed"
+fi
+grep -Fq "${env_token}" "${TMP_DIR}/dryrun-env-rendered.yaml" \
+  && fail "dry-run-env-redaction: an overlay env password reached the dry-run output"
+grep -q 'KC_SPI_DEMO_CREDENTIAL' "${TMP_DIR}/dryrun-env-rendered.yaml" \
+  || fail "dry-run-env-redaction: the injected env entry is missing"
+grep -A1 '"\?KC_SPI_DEMO_CREDENTIAL"\?' "${TMP_DIR}/dryrun-env-rendered.yaml" \
+  | grep -q 'value: <redacted>' \
+  || fail "dry-run-env-redaction: the env value was not masked"
+grep -A1 'name: KC_SPI_IMPORT_REALM_FILE_STRATEGY' \
+  "${TMP_DIR}/dryrun-env-rendered.yaml" \
+  | grep -q 'value: OVERWRITE' \
+  || fail "dry-run-env-redaction: a benign env value was masked"
+# Direct redactor check for the env rule, independent of the chart: a
+# credential-named entry is masked and a benignly named one is kept, in
+# the indentation Helm uses for container env lists.
+printf '%s\n' 'kind: Deployment' 'spec:' '  template:' \
+  '    - name: APP_PASSWORD' "      value: ${env_token}-direct" \
+  '    - name: APP_MODE' '      value: foreground' \
+  | "${SCRIPT_DIR}/redact-secret-values.sh" >"${TMP_DIR}/dryrun-env-direct.yaml"
+grep -Fq "${env_token}-direct" "${TMP_DIR}/dryrun-env-direct.yaml" \
+  && fail "dry-run-env-redaction: the redactor kept a credential env value"
+grep -q 'value: foreground' "${TMP_DIR}/dryrun-env-direct.yaml" \
+  || fail "dry-run-env-redaction: the redactor masked a benign env value"
+
 echo "input validation passed"
