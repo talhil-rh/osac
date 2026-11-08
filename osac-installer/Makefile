@@ -30,7 +30,15 @@ SHELL := /usr/bin/env bash -o pipefail
 .SHELLFLAGS := -ec
 
 # Extra helm --set/--set-string args appended to the OSAC chart command.
+# Caller-supplied Helm args are data, never command text: the value is
+# frozen verbatim -- Make-side references such as DRY_RUN_HELM_FLAGS below
+# read the frozen text without expanding Make expressions in it -- and
+# exported, and recipes word-split $${EXTRA_HELM_ARGS} from the
+# environment, so shell metacharacters in a caller value reach Helm as
+# argument text instead of executing.
 EXTRA_HELM_ARGS ?=
+override EXTRA_HELM_ARGS := $(value EXTRA_HELM_ARGS)
+export EXTRA_HELM_ARGS
 # Optional PEM CA bundle file for Keycloak's external OIDC identity providers.
 OIDC_IDP_CA_FILE ?=
 export OIDC_IDP_CA_FILE
@@ -268,6 +276,19 @@ ifneq ($(filter install-multicluster,$(MAKECMDGOALS)),)
 override INFRA_VALUES_EXTRA += -f values/vmaas-ci/multicluster-infra.yaml
 endif
 
+# Caller-supplied values lists are data, never command text. Freezing the
+# final value verbatim (after every profile assignment and the multicluster
+# append above) means no Make expression in a command-line or environment
+# value expands -- including at export time -- and recipes word-split
+# $${INFRA_VALUES_EXTRA}/$${INSTANCE_VALUES_EXTRA} from the environment,
+# so shell metacharacters in a caller value reach Helm as argument text
+# instead of executing. Makefile-authored profile values contain no Make
+# expressions, so freezing them is a no-op.
+override INFRA_VALUES_EXTRA := $(value INFRA_VALUES_EXTRA)
+export INFRA_VALUES_EXTRA
+override INSTANCE_VALUES_EXTRA := $(value INSTANCE_VALUES_EXTRA)
+export INSTANCE_VALUES_EXTRA
+
 # Kind cluster create/delete routing. dev-full needs a rootful runtime (KubeVirt
 # chowns /dev/kvm), so it goes through the cross-platform wrapper. Apple Silicon
 # also uses the wrapper for both Kind profiles, keeping image build/load and Kind
@@ -487,7 +508,7 @@ endif
 		--wait --timeout 5m
 	helm upgrade --install osac-infra $(INFRA_CHART) \
 		--namespace osac-infra --create-namespace \
-		-f $(INFRA_VALUES) $(INFRA_VALUES_EXTRA) \
+		-f $(INFRA_VALUES) $${INFRA_VALUES_EXTRA} \
 		--set osacNamespace=$(NS) \
 		$(INFRA_HELM_ARGS) \
 		$(OIDC_IDP_CA_HELM_ARGS) \
@@ -508,7 +529,7 @@ else
 		done'
 	helm upgrade --install osac-deps $(DEPS_CHART) \
 		--namespace osac-deps --create-namespace \
-		--values $(INFRA_VALUES) $(INFRA_VALUES_EXTRA) \
+		--values $(INFRA_VALUES) $${INFRA_VALUES_EXTRA} \
 		--set lvms.channel=stable-$(OCP_VERSION) \
 		$(INFRA_HELM_ARGS) \
 		--timeout 30m --wait
@@ -519,7 +540,7 @@ else
 	# when EVPN is disabled. Match Helm's wait to its deadline plus a margin.
 	@evpn_job_deadline="$$(helm template osac-infra $(INFRA_CHART) \
 		--namespace osac-infra \
-		--values $(INFRA_VALUES) $(INFRA_VALUES_EXTRA) \
+		--values $(INFRA_VALUES) $${INFRA_VALUES_EXTRA} \
 		--set osacNamespace=$(NS) \
 		--set lvms.channel=stable-$(OCP_VERSION) \
 		--set keycloak.hostname=https://keycloak-keycloak.$(DOMAIN) \
@@ -539,7 +560,7 @@ else
 	fi; \
 	helm upgrade --install osac-infra $(INFRA_CHART) \
 		--namespace osac-infra --create-namespace \
-		--values $(INFRA_VALUES) $(INFRA_VALUES_EXTRA) \
+		--values $(INFRA_VALUES) $${INFRA_VALUES_EXTRA} \
 		--set osacNamespace=$(NS) \
 		--set lvms.channel=stable-$(OCP_VERSION) \
 		--set keycloak.hostname=https://keycloak-keycloak.$(DOMAIN) \
@@ -664,29 +685,29 @@ endif
 ifeq ($(PLATFORM),kind)
 	@helm template osac-infra $(INFRA_CHART) \
 		--namespace osac-infra \
-		-f $(INFRA_VALUES) $(INFRA_VALUES_EXTRA) \
+		-f $(INFRA_VALUES) $${INFRA_VALUES_EXTRA} \
 		--set osacNamespace=$(NS) \
 		$(INFRA_HELM_ARGS) \
 		$(OIDC_IDP_CA_HELM_ARGS) >/dev/null \
 	|| { echo "ERROR: invalid installer inputs for osac-infra; no cluster changes were made. Fix the values reported above and retry." >&2; exit 1; }
 	@source scripts/lib.sh && netbox_seed_check osac-infra $(INFRA_CHART) \
 		--namespace osac-infra \
-		-f $(INFRA_VALUES) $(INFRA_VALUES_EXTRA) \
+		-f $(INFRA_VALUES) $${INFRA_VALUES_EXTRA} \
 		--set osacNamespace=$(NS) \
 		$(INFRA_HELM_ARGS) $(OIDC_IDP_CA_HELM_ARGS) && \
 	render_osac_chart_offline "$(NETBOX_OFFLINE_PLACEHOLDER)" \
 		osac $(if $(OSAC_CHART_OCI_REF),$(OSAC_CHART_OCI_REF)$(if $(OSAC_CHART_OCI_VERSION), --version $(OSAC_CHART_OCI_VERSION)),$(OSAC_CHART)) \
-		-f $(INSTANCE_VALUES) $(INSTANCE_VALUES_EXTRA) \
+		-f $(INSTANCE_VALUES) $${INSTANCE_VALUES_EXTRA} \
 		--namespace $(NS) \
 		--set-string global.osacDeploymentId=$(NS)/osac \
 		$(INSTANCE_HELM_ARGS) \
-		$(EXTRA_HELM_ARGS) \
+		$${EXTRA_HELM_ARGS} \
 		$(REMOTE_CLUSTER_HELM_ARGS) \
 	|| { echo "ERROR: invalid installer inputs for the osac chart; no cluster changes were made. Fix the values reported above and retry." >&2; exit 1; }
 ifeq ($(PROFILE),dev-full)
 	@helm template osac-devstack $(CHARTS)/osac-devstack \
 		--namespace $(NS) \
-		-f $(INSTANCE_VALUES) $(INSTANCE_VALUES_EXTRA) \
+		-f $(INSTANCE_VALUES) $${INSTANCE_VALUES_EXTRA} \
 		--set osacNamespace=$(NS) \
 		--set kindClusterName=$(KIND_CLUSTER_NAME) \
 		--set ui.enabled=true \
@@ -700,13 +721,13 @@ else
 	@[ -n "$(DOMAIN)" ] || { echo "ERROR: could not determine cluster domain for input validation. Is oc logged in?" >&2; exit 1; }
 	@helm template osac-deps $(DEPS_CHART) \
 		--namespace osac-deps \
-		--values $(INFRA_VALUES) $(INFRA_VALUES_EXTRA) \
+		--values $(INFRA_VALUES) $${INFRA_VALUES_EXTRA} \
 		--set lvms.channel=stable-$(OCP_VERSION) \
 		$(INFRA_HELM_ARGS) >/dev/null \
 	|| { echo "ERROR: invalid installer inputs for osac-deps; no cluster changes were made. Fix the values reported above and retry." >&2; exit 1; }
 	@helm template osac-infra $(INFRA_CHART) \
 		--namespace osac-infra \
-		--values $(INFRA_VALUES) $(INFRA_VALUES_EXTRA) \
+		--values $(INFRA_VALUES) $${INFRA_VALUES_EXTRA} \
 		--set osacNamespace=$(NS) \
 		--set lvms.channel=stable-$(OCP_VERSION) \
 		--set keycloak.hostname=https://keycloak-keycloak.$(DOMAIN) \
@@ -718,12 +739,12 @@ else
 	|| { echo "ERROR: invalid installer inputs for osac-infra; no cluster changes were made. Fix the values reported above and retry." >&2; exit 1; }
 	@source scripts/lib.sh && netbox_seed_check osac-infra $(INFRA_CHART) \
 		--namespace osac-infra \
-		--values $(INFRA_VALUES) $(INFRA_VALUES_EXTRA) \
+		--values $(INFRA_VALUES) $${INFRA_VALUES_EXTRA} \
 		--set osacNamespace=$(NS) \
 		$(INFRA_HELM_ARGS) $(OIDC_IDP_CA_HELM_ARGS) && \
 	render_osac_chart_offline "$(NETBOX_OFFLINE_PLACEHOLDER)" \
 		osac $(if $(OSAC_CHART_OCI_REF),$(OSAC_CHART_OCI_REF)$(if $(OSAC_CHART_OCI_VERSION), --version $(OSAC_CHART_OCI_VERSION)),$(OSAC_CHART)) \
-		-f $(INSTANCE_VALUES) $(INSTANCE_VALUES_EXTRA) \
+		-f $(INSTANCE_VALUES) $${INSTANCE_VALUES_EXTRA} \
 		--namespace $(NS) \
 		--set-string global.osacDeploymentId=$(NS)/osac \
 		--set service.externalHostname=fulfillment-api-$(NS).$(DOMAIN) \
@@ -732,7 +753,7 @@ else
 		--set ui.auth.oidcIssuerURL=https://keycloak-keycloak.$(DOMAIN)/realms/osac \
 		--set ui.externalHostname=$(UI_HOSTNAME) \
 		$(INSTANCE_HELM_ARGS) \
-		$(EXTRA_HELM_ARGS) \
+		$${EXTRA_HELM_ARGS} \
 		$(REMOTE_CLUSTER_HELM_ARGS) \
 	|| { echo "ERROR: invalid installer inputs for the osac chart; no cluster changes were made. Fix the values reported above and retry." >&2; exit 1; }
 endif
@@ -772,12 +793,12 @@ endif
 		validate_remote_kubeconfig_secret "$${REMOTE_KUBECONFIG_SECRET_NAME}" "$${REMOTE_KUBECONFIG_SECRET_KEY}"; \
 	fi; \
 	helm upgrade --install osac $(if $(OSAC_CHART_OCI_REF),$(OSAC_CHART_OCI_REF)$(if $(OSAC_CHART_OCI_VERSION), --version $(OSAC_CHART_OCI_VERSION)),$(OSAC_CHART)) \
-		-f $(INSTANCE_VALUES) $(INSTANCE_VALUES_EXTRA) \
+		-f $(INSTANCE_VALUES) $${INSTANCE_VALUES_EXTRA} \
 		--namespace $(NS) --create-namespace \
 		--set-string global.osacDeploymentId=$(NS)/osac \
 		$(if $(DOMAIN),--set service.externalHostname=fulfillment-api-$(NS).$(DOMAIN) --set service.internalHostname=fulfillment-internal-api-$(NS).$(DOMAIN) --set global.clusterDomain=$(DOMAIN) --set ui.auth.oidcIssuerURL=https://keycloak-keycloak.$(DOMAIN)/realms/osac --set ui.externalHostname=$(UI_HOSTNAME)) \
 		$(INSTANCE_HELM_ARGS) \
-		$(EXTRA_HELM_ARGS) $(OSAC_HELM_FORCE_CONFLICTS) $(REMOTE_CLUSTER_HELM_ARGS) \
+		$${EXTRA_HELM_ARGS} $(OSAC_HELM_FORCE_CONFLICTS) $(REMOTE_CLUSTER_HELM_ARGS) \
 		--wait --timeout 40m
 .PHONY: uninstall-osac
 uninstall-osac: ## Uninstall OSAC instance (PLATFORM= PROFILE= NS= required)
@@ -802,7 +823,7 @@ ifeq ($(HELM_MAJOR),4)
 endif
 	# Helm install: operators + AWX + UI Gateway route + seeding
 	helm upgrade --install osac-devstack charts/osac-devstack \
-		-f $(INSTANCE_VALUES) $(INSTANCE_VALUES_EXTRA) \
+		-f $(INSTANCE_VALUES) $${INSTANCE_VALUES_EXTRA} \
 		--namespace $(NS) --create-namespace \
 		--set osacNamespace=$(NS) \
 		--set kindClusterName=$(KIND_CLUSTER_NAME) \
@@ -833,29 +854,29 @@ endif
 .PHONY: install-dry-run
 install-dry-run: helm-deps validate-osac-chart-oci-ref ## Render every release in make install without connecting to a cluster
 ifeq ($(PLATFORM),kind)
-	helm template cert-manager oci://quay.io/jetstack/charts/cert-manager \
+	@helm template cert-manager oci://quay.io/jetstack/charts/cert-manager \
 		--version v1.20.0 --namespace cert-manager \
 		--set crds.enabled=true | scripts/redact-secret-values.sh
-	helm template trust-manager oci://quay.io/jetstack/charts/trust-manager \
+	@helm template trust-manager oci://quay.io/jetstack/charts/trust-manager \
 		--version v0.22.0 --namespace cert-manager \
 		--set defaultPackage.enabled=false | scripts/redact-secret-values.sh
-	helm template envoy-gateway oci://docker.io/envoyproxy/gateway-helm \
+	@helm template envoy-gateway oci://docker.io/envoyproxy/gateway-helm \
 		--version v1.6.5 --namespace envoy-gateway | scripts/redact-secret-values.sh
-	helm template strimzi-cluster-operator oci://quay.io/strimzi-helm/strimzi-kafka-operator \
+	@helm template strimzi-cluster-operator oci://quay.io/strimzi-helm/strimzi-kafka-operator \
 		--version 1.1.0 --namespace osac-kafka | scripts/redact-secret-values.sh
-	helm template osac-infra $(INFRA_CHART) \
+	@helm template osac-infra $(INFRA_CHART) \
 		--namespace osac-infra \
-		-f $(INFRA_VALUES) $(INFRA_VALUES_EXTRA) \
+		-f $(INFRA_VALUES) $${INFRA_VALUES_EXTRA} \
 		--set osacNamespace=$(NS) \
 		$(OIDC_IDP_CA_HELM_ARGS) | scripts/redact-secret-values.sh
 else
-	helm template osac-deps $(DEPS_CHART) \
+	@helm template osac-deps $(DEPS_CHART) \
 		--namespace osac-deps \
-		--values $(INFRA_VALUES) $(INFRA_VALUES_EXTRA) \
+		--values $(INFRA_VALUES) $${INFRA_VALUES_EXTRA} \
 		--set lvms.channel=stable-$(DRY_RUN_OCP_VERSION) | scripts/redact-secret-values.sh
-	helm template osac-infra $(INFRA_CHART) \
+	@helm template osac-infra $(INFRA_CHART) \
 		--namespace osac-infra \
-		--values $(INFRA_VALUES) $(INFRA_VALUES_EXTRA) \
+		--values $(INFRA_VALUES) $${INFRA_VALUES_EXTRA} \
 		--set osacNamespace=$(NS) \
 		--set lvms.channel=stable-$(DRY_RUN_OCP_VERSION) \
 		--set keycloak.hostname=https://keycloak-keycloak.$(DRY_RUN_CLUSTER_DOMAIN) \
@@ -864,15 +885,15 @@ else
 		--set "bundledVault.keycloakIssuerUrl=https://keycloak-keycloak.$(DRY_RUN_CLUSTER_DOMAIN)/realms/osac" \
 		$(OIDC_IDP_CA_HELM_ARGS) | scripts/redact-secret-values.sh
 endif
-	helm template osac $(if $(OSAC_CHART_OCI_REF),$(OSAC_CHART_OCI_REF)$(if $(OSAC_CHART_OCI_VERSION), --version $(OSAC_CHART_OCI_VERSION)),$(OSAC_CHART)) \
-		-f $(INSTANCE_VALUES) $(INSTANCE_VALUES_EXTRA) \
+	@helm template osac $(if $(OSAC_CHART_OCI_REF),$(OSAC_CHART_OCI_REF)$(if $(OSAC_CHART_OCI_VERSION), --version $(OSAC_CHART_OCI_VERSION)),$(OSAC_CHART)) \
+		-f $(INSTANCE_VALUES) $${INSTANCE_VALUES_EXTRA} \
 		--namespace $(NS) \
 		--set-string global.osacDeploymentId=$(NS)/osac \
 		$(if $(filter openshift,$(PLATFORM)),--set service.externalHostname=fulfillment-api-$(NS).$(DRY_RUN_CLUSTER_DOMAIN) --set service.internalHostname=fulfillment-internal-api-$(NS).$(DRY_RUN_CLUSTER_DOMAIN) --set global.clusterDomain=$(DRY_RUN_CLUSTER_DOMAIN) --set ui.auth.oidcIssuerURL=https://keycloak-keycloak.$(DRY_RUN_CLUSTER_DOMAIN)/realms/osac --set ui.externalHostname=osac-ui-$(NS).$(DRY_RUN_CLUSTER_DOMAIN)) \
-		$(EXTRA_HELM_ARGS) | scripts/redact-secret-values.sh
+		$${EXTRA_HELM_ARGS} | scripts/redact-secret-values.sh
 ifeq ($(PROFILE),dev-full)
-	helm dependency build charts/osac-devstack
-	helm template osac-devstack charts/osac-devstack \
+	@helm dependency build charts/osac-devstack
+	@helm template osac-devstack charts/osac-devstack \
 		--namespace $(NS) \
 		--set osacNamespace=$(NS) \
 		--set kindClusterName=$(KIND_CLUSTER_NAME) \
@@ -903,12 +924,12 @@ install-multicluster: validate-inputs ## Prepare a VMaaS workload cluster, then 
 		EVPN_VALUES="$(INFRA_VALUES)"
 	$(MAKE) install-infra PLATFORM=openshift PROFILE=vmaas-ci NS=$(NS) \
 		KUBECONFIG="$(KUBECONFIG)" \
-		INFRA_VALUES_EXTRA="$(INFRA_VALUES_EXTRA)"
+		INFRA_VALUES_EXTRA="$${INFRA_VALUES_EXTRA}"
 	$(MAKE) install-osac PLATFORM=openshift PROFILE=vmaas-ci NS=$(NS) \
 		KUBECONFIG="$(KUBECONFIG)" \
 		REMOTE_KUBECONFIG="$(REMOTE_KUBECONFIG)" \
 		REMOTE_API_ADDRESS="$(REMOTE_API_ADDRESS)" \
-		EXTRA_HELM_ARGS="$(EXTRA_HELM_ARGS)"
+		EXTRA_HELM_ARGS="$${EXTRA_HELM_ARGS}"
 
 .PHONY: prepare-remote-cluster
 prepare-remote-cluster: helm-infra-deps ## Prepare the remote VMaaS workload cluster without changing management

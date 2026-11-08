@@ -200,9 +200,21 @@ MOCK_LOG="${LOG}" PATH="${STUB_BIN}:${PATH}" \
   make -C "${SANDBOX}" --no-print-directory -n install-multicluster \
     PLATFORM=openshift PROFILE=vmaas-ci NS=osac \
     >"${mc_plan}" 2>/dev/null || fail "make -n install-multicluster failed"
+# The values list reaches recipes through the environment, so the plan
+# shows the $${INFRA_VALUES_EXTRA} token; the exported value itself (the
+# vmaas-ci base plus the multicluster overlay) is asserted from the make
+# database, proving the gate's osac-infra render applies the overlay.
 sed -n '1,/prepare-remote-cluster/p' "${mc_plan}" | join_continuations \
-  | grep 'helm template osac-infra' | grep -q 'multicluster-infra.yaml' \
-  || fail "install-multicluster: the gate does not render the multicluster overlay"
+  | grep 'helm template osac-infra' | grep -Fq '${INFRA_VALUES_EXTRA}' \
+  || fail "install-multicluster: the gate render omits the values-list token"
+mc_db="${TMP_DIR}/multicluster.db"
+MOCK_LOG="${LOG}" PATH="${STUB_BIN}:${PATH}" \
+  REMOTE_KUBECONFIG="${LOG}" \
+  make -C "${SANDBOX}" --no-print-directory -p -n install-multicluster \
+    PLATFORM=openshift PROFILE=vmaas-ci NS=osac \
+    >"${mc_db}" 2>/dev/null || fail "make -p -n install-multicluster failed"
+grep -q '^INFRA_VALUES_EXTRA := .*multicluster-infra.yaml' "${mc_db}" \
+  || fail "install-multicluster: the exported values list lacks the overlay"
 
 # Gate/install parity for INFRA_HELM_ARGS: every helm command touching
 # osac-infra or osac-deps in the OpenShift install plan -- the gate's
@@ -306,6 +318,53 @@ grep -q 'NS must be a lowercase DNS label' "${TMP_DIR}/ns.err" \
   || fail "ns-injection: the failure did not name the namespace rule"
 assert_prevalidation_commands ns-injection
 
+# Caller-supplied Helm args are data, never command text: EXTRA_HELM_ARGS
+# is frozen verbatim (no Make expression in it expands, including at
+# export time) and reaches recipes through the environment, so both Make
+# syntax and shell metacharacters in a caller value must reach Helm as
+# argument text instead of executing. The sentinel files prove nothing ran.
+echo "checking extra-args-injection (metacharacters in EXTRA_HELM_ARGS stay data)"
+extra_sentinel="${TMP_DIR}/extra-args-injection-ran"
+: >"${LOG}"
+if MOCK_LOG="${LOG}" PATH="${STUB_BIN}:${PATH}" \
+  REMOTE_KUBECONFIG="${LOG}" \
+  make -C "${SANDBOX}" --no-print-directory validate-inputs \
+    PLATFORM=openshift PROFILE=vmaas-ci NS=osac \
+    EXTRA_HELM_ARGS='--set operator.fulfillment.serverAddress=ok$(touch '"${extra_sentinel}"')-$$(touch '"${extra_sentinel}"'-2)' \
+    >"${TMP_DIR}/extra-args.out" 2>"${TMP_DIR}/extra-args.err"; then
+  :
+else
+  fail "extra-args-injection: the gate rejected a valid EXTRA_HELM_ARGS value"
+fi
+[ ! -e "${extra_sentinel}" ] \
+  || fail "extra-args-injection: Make syntax in EXTRA_HELM_ARGS executed"
+[ ! -e "${extra_sentinel}-2" ] \
+  || fail "extra-args-injection: shell metacharacters in EXTRA_HELM_ARGS executed"
+grep -q 'helm template osac ' "${LOG}" \
+  || fail "extra-args-injection: the gate render never ran"
+assert_prevalidation_commands extra-args-injection
+
+# Caller-supplied values lists are data too: INFRA_VALUES_EXTRA is frozen
+# and env-passed, so shell metacharacters in it word-split into Helm
+# argument text (visible in the stub log) instead of executing.
+echo "checking infra-values-injection (metacharacters in INFRA_VALUES_EXTRA stay data)"
+infra_sentinel="${TMP_DIR}/infra-values-injection-ran"
+: >"${LOG}"
+if MOCK_LOG="${LOG}" PATH="${STUB_BIN}:${PATH}" \
+  make -C "${SANDBOX}" --no-print-directory validate-inputs \
+    PLATFORM=openshift PROFILE=dev NS=osac \
+    "INFRA_VALUES_EXTRA=-f values/dev/infra.yaml; touch ${infra_sentinel}" \
+    >"${TMP_DIR}/infra-args.out" 2>"${TMP_DIR}/infra-args.err"; then
+  :
+else
+  fail "infra-values-injection: the gate rejected a valid INFRA_VALUES_EXTRA value"
+fi
+[ ! -e "${infra_sentinel}" ] \
+  || fail "infra-values-injection: shell metacharacters in INFRA_VALUES_EXTRA executed"
+grep -q -- '-f values/dev/infra.yaml; touch' "${LOG}" \
+  || fail "infra-values-injection: the metacharacter-bearing list did not reach Helm as data"
+assert_prevalidation_commands infra-values-injection
+
 # The dry run prints rendered manifests to the terminal and to collected
 # CI logs, so every dry-run render is piped through the Secret-payload
 # redactor; an unpiped render could leak credentials supplied through a
@@ -327,6 +386,28 @@ for dry_platform in kind openshift; do
   [ "${dry_renders}" = "${dry_redacted}" ] \
     || fail "install-dry-run (${dry_platform}): a render skips Secret redaction"
 done
+
+# The dry run's helm commands are not echoed by make: recipe text can
+# carry an inline --set password through EXTRA_HELM_ARGS, and make's echo
+# of a recipe line would print it to the terminal and CI logs before any
+# redacted render runs. The password reaches Helm through the environment
+# (the stub log redacts --set values), so neither make's output nor a
+# leaked env token may expose it.
+echo "checking dry-run-echo-suppression (inline passwords stay out of make's echo)"
+echo_password="inline-password-$(date +%s)-$$"
+: >"${LOG}"
+MOCK_LOG="${LOG}" PATH="${STUB_BIN}:${PATH}" \
+  make -C "${SANDBOX}" --no-print-directory install-dry-run \
+    PLATFORM=kind PROFILE=dev NS=osac \
+    "EXTRA_HELM_ARGS=--set=bmf.netbox.tokenValue=${echo_password}" \
+    >"${TMP_DIR}/dryrun-echo.out" 2>"${TMP_DIR}/dryrun-echo.err" \
+  || fail "dry-run-echo-suppression: the stubbed dry run failed"
+grep -Fq "${echo_password}" "${TMP_DIR}/dryrun-echo.out" "${TMP_DIR}/dryrun-echo.err" \
+  && fail "dry-run-echo-suppression: make echoed an inline password"
+grep -Fq '${EXTRA_HELM_ARGS}' "${TMP_DIR}/dryrun-echo.out" \
+  && fail "dry-run-echo-suppression: a raw env token reached the output"
+grep -q 'helm template osac ' "${LOG}" \
+  || fail "dry-run-echo-suppression: the dry run never rendered the osac chart"
 
 # Remote-cluster inputs: the gate must reject invalid static identifiers
 # before any cluster mutation -- install-osac's own re-check runs only after
@@ -392,9 +473,23 @@ MOCK_LOG="${LOG}" PATH="${STUB_BIN}:${PATH}" \
     >"${remote_order_plan}" 2>/dev/null || fail "make -n install-osac (remote order) failed"
 for remote_cmd in 'render_osac_chart_offline' 'helm upgrade --install osac '; do
   join_continuations <"${remote_order_plan}" | grep "${remote_cmd}" \
-    | grep -q 'caller-override.*operator.remoteClusterKubeconfigSecretName=osac-remote-kubeconfig' \
+    | grep -Eq '\$\{EXTRA_HELM_ARGS\}.*operator\.remoteClusterKubeconfigSecretName=osac-remote-kubeconfig' \
     || fail "remote-flag order: ${remote_cmd} does not apply EXTRA_HELM_ARGS before the remote-cluster flags"
 done
+# The caller-supplied override itself must flow to Helm at runtime: with
+# stubbed Helm the gate succeeds and the render runs with the args in the
+# environment (mock-log redacts --set-string values, so only the run is
+# asserted here; the wiring above pins where the token is applied).
+: >"${LOG}"
+MOCK_LOG="${LOG}" PATH="${STUB_BIN}:${PATH}" \
+  REMOTE_KUBECONFIG="${LOG}" \
+  make -C "${SANDBOX}" --no-print-directory validate-inputs \
+    PLATFORM=openshift PROFILE=vmaas-ci NS=osac \
+    EXTRA_HELM_ARGS='--set-string operator.remoteClusterKubeconfigSecretName=caller-override' \
+    >"${TMP_DIR}/remote-order.out" 2>"${TMP_DIR}/remote-order.err" \
+    || fail "remote-flag order: the gate rejected a valid EXTRA_HELM_ARGS override"
+grep -q 'helm template osac ' "${LOG}" \
+  || fail "remote-flag order: the gate render never ran with the override"
 
 # The gate's osac-chart render goes through render_osac_chart_offline with
 # the render-only placeholder token: the function applies the placeholder
@@ -745,5 +840,64 @@ grep -q 'kind: Secret' "${TMP_DIR}/dryrun-rendered.yaml" \
   || fail "dry-run-secret-redaction: the render produced no Secret to redact"
 grep -q ': <redacted>' "${TMP_DIR}/dryrun-rendered.yaml" \
   || fail "dry-run-secret-redaction: no Secret payload was masked"
+
+# Multi-line Secret payloads must be redacted too: Helm renders a value
+# containing newlines as a block scalar (`key: |`) whose body lines sit
+# deeper than the entry keys. The redactor drops the body lines and masks
+# the key line, so PEM-shaped credentials cannot reach the dry-run output.
+echo "checking dry-run-multiline-secret-redaction (block-scalar payloads stay out)"
+multiline_token="multiline-token-$(date +%s)-$$"
+{
+  printf 'bmf:\n  netbox:\n    tokenValue: |\n'
+  printf '      header-%s\n' "${multiline_token}"
+  printf '      footer-%s\n' "${multiline_token}"
+} >"${TMP_DIR}/dryrun-multiline-token.yaml"
+if ! helm template dryrun-osac "${OSAC_CHART_DIR}" \
+    --values "${OSAC_CHART_DIR}/ci/default-values.yaml" \
+    --namespace osac \
+    "${NETBOX_PROFILE_ARGS[@]}" \
+    -f "${TMP_DIR}/dryrun-multiline-token.yaml" \
+    | "${SCRIPT_DIR}/redact-secret-values.sh" \
+    >"${TMP_DIR}/dryrun-multiline-rendered.yaml" 2>>"${netbox_gate_err}"; then
+  fail "dry-run-multiline-secret-redaction: the osac chart render failed"
+fi
+grep -Fq "header-${multiline_token}" "${TMP_DIR}/dryrun-multiline-rendered.yaml" \
+  && fail "dry-run-multiline-secret-redaction: a block-scalar body line survived"
+grep -Fq "footer-${multiline_token}" "${TMP_DIR}/dryrun-multiline-rendered.yaml" \
+  && fail "dry-run-multiline-secret-redaction: a block-scalar body line survived"
+grep -q 'kind: Secret' "${TMP_DIR}/dryrun-multiline-rendered.yaml" \
+  || fail "dry-run-multiline-secret-redaction: the render produced no Secret"
+# Direct redactor check for the block-scalar body rule, independent of
+# Helm's YAML marshaling choices for the chart's values.
+printf '%s\n' 'kind: Secret' 'stringData:' '  tls.crt: |' \
+  "    -----BEGIN ${multiline_token}-----" \
+  | "${SCRIPT_DIR}/redact-secret-values.sh" \
+  | grep -Fq -- "-----BEGIN ${multiline_token}-----" \
+  && fail "dry-run-multiline-secret-redaction: the redactor kept a block-scalar body"
+
+# The EVPN/Netris overlay carries internal infrastructure hostnames into
+# the AAP instance-group ConfigMaps (`*-ig`); the dry run must mask that
+# endpoint config so internal hostnames (and any credential misplaced in
+# the config half instead of the parallel Secret) stay out of CI logs.
+echo "checking dry-run-evpn-endpoint-redaction (internal hostnames stay out)"
+evpn_host="netris-ctrl-$(date +%s)-$$.lab.internal.example.com"
+if ! helm template dryrun-osac "${OSAC_CHART_DIR}" \
+    --values "${INSTALLER_DIR}/values/vmaas-ci/instance.yaml" \
+    --values "${INSTALLER_DIR}/values/vmaas-ci/netris.yaml" \
+    --namespace osac \
+    --set service.externalHostname=fulfillment-api-osac.apps.example.com \
+    --set service.internalHostname=fulfillment-internal-api-osac.apps.example.com \
+    --set ui.auth.oidcIssuerURL=https://keycloak-keycloak.apps.example.com/realms/osac \
+    --set "aap.instanceGroups.networkFulfillment.config.NETRIS_CONTROLLER_URL=https://${evpn_host}" \
+    | "${SCRIPT_DIR}/redact-secret-values.sh" \
+    >"${TMP_DIR}/dryrun-evpn-rendered.yaml" 2>>"${netbox_gate_err}"; then
+  fail "dry-run-evpn-endpoint-redaction: the osac chart render failed"
+fi
+grep -Fq "${evpn_host}" "${TMP_DIR}/dryrun-evpn-rendered.yaml" \
+  && fail "dry-run-evpn-endpoint-redaction: an internal hostname reached the dry-run output"
+grep -q 'kind: ConfigMap' "${TMP_DIR}/dryrun-evpn-rendered.yaml" \
+  || fail "dry-run-evpn-endpoint-redaction: the render produced no ConfigMap"
+grep -q 'NETRIS_CONTROLLER_URL: <redacted>' "${TMP_DIR}/dryrun-evpn-rendered.yaml" \
+  || fail "dry-run-evpn-endpoint-redaction: the endpoint config was not masked"
 
 echo "input validation passed"
