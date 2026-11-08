@@ -942,6 +942,25 @@ render_osac_chart_offline "${offline_token}" \
   -f "${TMP_DIR}/netbox-token.yaml" \
   || fail "netbox-file-string-token: a valid file-supplied token must render"
 
+# A duplicate metering reader name must fail the gate's own render (the
+# umbrella chart carries the readers into the metering subchart) without
+# echoing the name: reader names are customer-supplied infrastructure
+# identifiers -- often internal hostnames -- and the gate's error text
+# reaches the terminal and CI logs.
+echo "checking metering-reader-duplicate (duplicate names fail the gate without the name)"
+if render_osac_chart_offline "${offline_token}" \
+    osac "${OSAC_CHART_DIR}" --values "${OSAC_CHART_DIR}/ci/default-values.yaml" \
+    --namespace osac \
+    --set 'metering.readers[0].name=metrics-reader.internal.example.com' \
+    --set 'metering.readers[1].name=metrics-reader.internal.example.com' \
+    >/dev/null 2>"${netbox_gate_err}"; then
+  fail "metering-reader-duplicate: the gate accepted a duplicate reader name"
+fi
+grep -Eiq 'duplicate metering reader' "${netbox_gate_err}" \
+  || fail "metering-reader-duplicate: the failure did not name the constraint"
+grep -Fq 'metrics-reader.internal.example.com' "${netbox_gate_err}" \
+  && fail "metering-reader-duplicate: the failure echoed the reader name"
+
 # The dry run's rendered output reaches the terminal and CI logs, so
 # Secret payload values -- including a password supplied through a values
 # overlay -- must be masked. The overlay's token lands in the bmf NetBox
@@ -1145,6 +1164,35 @@ grep -Fq 'extra-env-0: <redacted>' "${TMP_DIR}/dryrun-env-on-rendered.yaml" \
   || fail "dry-run-env-redaction: the slash-named entry payload was not masked"
 grep -Fq 'extra-env-1: <redacted>' "${TMP_DIR}/dryrun-env-on-rendered.yaml" \
   || fail "dry-run-env-redaction: the boolean-named entry payload was not masked"
+# extraEnv also accepts a mapping of entry objects keyed by name: both
+# shapes have always rendered. The Secret keys and their secretKeyRefs
+# must stay positional and matching for either shape -- a map range's
+# index is the map key, which is neither Secret-key-safe nor what the
+# Deployment's positional key expects.
+printf 'keycloak:\n  extraEnv:\n    alpha:\n      name: KC_SPI_DEMO_URL\n      value: map-url-check\n    beta:\n      name: KC_SPI_DEMO_SESSION\n      value: map-session-check\n' \
+  >"${TMP_DIR}/dryrun-env-map.yaml"
+if ! helm template osac-infra "${INFRA_CHART_DIR}" \
+    --namespace osac-infra \
+    --values "${INSTALLER_DIR}/values/vmaas-ci/infra.yaml" \
+    -f "${TMP_DIR}/dryrun-env-map.yaml" \
+    | "${SCRIPT_DIR}/redact-secret-values.sh" \
+    >"${TMP_DIR}/dryrun-env-map-rendered.yaml" 2>>"${netbox_gate_err}"; then
+  fail "dry-run-env-redaction: the mapping-shaped extra-env render failed"
+fi
+grep -Fq 'name: "KC_SPI_DEMO_URL"' "${TMP_DIR}/dryrun-env-map-rendered.yaml" \
+  || fail "dry-run-env-redaction: a mapping-shaped env entry is missing"
+grep -Fq 'key: "extra-env-0"' "${TMP_DIR}/dryrun-env-map-rendered.yaml" \
+  || fail "dry-run-env-redaction: the mapping-shaped entries do not use index keys"
+grep -Fq 'key: "extra-env-1"' "${TMP_DIR}/dryrun-env-map-rendered.yaml" \
+  || fail "dry-run-env-redaction: the second mapping-shaped entry lost its index key"
+grep -Fq 'extra-env-0: <redacted>' "${TMP_DIR}/dryrun-env-map-rendered.yaml" \
+  || fail "dry-run-env-redaction: a mapping-shaped entry payload was not masked"
+grep -Fq 'extra-env-1: <redacted>' "${TMP_DIR}/dryrun-env-map-rendered.yaml" \
+  || fail "dry-run-env-redaction: the second mapping entry payload was not masked"
+for map_key in extra-env-alpha extra-env-beta; do
+  grep -Fq "${map_key}" "${TMP_DIR}/dryrun-env-map-rendered.yaml" \
+    && fail "dry-run-env-redaction: an extra-env key was derived from the map key (${map_key})"
+done
 grep -A1 'name: KC_SPI_IMPORT_REALM_FILE_STRATEGY' \
   "${TMP_DIR}/dryrun-env-rendered.yaml" \
   | grep -q 'value: OVERWRITE' \

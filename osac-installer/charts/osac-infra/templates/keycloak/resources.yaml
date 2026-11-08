@@ -162,7 +162,8 @@ stringData:
   admin-username: {{ .Values.keycloak.adminUsername | quote }}
   admin-password: {{ .Values.keycloak.adminPassword | quote }}
   default-user-password: {{ .Values.keycloak.defaultUserPassword | quote }}
-{{- if .Values.keycloak.extraEnv }}
+{{- $extraEnv := include "osac-infra.keycloakExtraEnvEntries" . | fromJsonArray }}
+{{- if $extraEnv }}
 ---
 apiVersion: v1
 kind: Secret
@@ -173,12 +174,13 @@ metadata:
     {{- include "osac-infra.labels" . | nindent 4 }}
 type: Opaque
 stringData:
-{{- range $index, $entry := .Values.keycloak.extraEnv }}
+{{- range $index, $entry := $extraEnv }}
   {{- /* Secret keys must match [-._a-zA-Z0-9]+, but relaxed container
   env names (Kubernetes 1.33+) allow characters outside that set, and a
   YAML 1.1 boolean-like name such as "on" would not round-trip unquoted.
-  The key is therefore derived from the entry's position, never its
-  name; the Deployment's secretKeyRef uses the same key. */}}
+  The key is therefore derived from the entry's position in the shared
+  entry list (osac-infra.keycloakExtraEnvEntries), never its name or
+  map key; the Deployment's secretKeyRef uses the same list and key. */}}
   extra-env-{{ $index }}: {{ $entry.value | quote }}
 {{- end }}
 {{- end }}
@@ -526,7 +528,8 @@ spec:
         - name: KC_SPI_IMPORT_REALM_FILE_STRATEGY
           value: OVERWRITE
         {{- end }}
-        {{- range $index, $entry := .Values.keycloak.extraEnv }}
+        {{- $extraEnv := include "osac-infra.keycloakExtraEnvEntries" . | fromJsonArray }}
+        {{- range $index, $entry := $extraEnv }}
         - name: {{ $entry.name | quote }}
           valueFrom:
             secretKeyRef:

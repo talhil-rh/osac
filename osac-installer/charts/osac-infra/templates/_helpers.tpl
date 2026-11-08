@@ -30,6 +30,26 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- end }}
 
 {{/*
+keycloak.extraEnv accepts both the documented list of {name, value} entries
+and a mapping of those entry objects keyed by name (either shape has always
+rendered). The keycloak-extra-env Secret and the Deployment's secretKeyRefs
+must iterate the same entries in the same order, so both ranges include this
+helper: it normalizes either shape to one list -- map entries in key order,
+which Go templates sort deterministically -- and returns it as JSON.
+*/}}
+{{- define "osac-infra.keycloakExtraEnvEntries" -}}
+{{- $entries := .Values.keycloak.extraEnv -}}
+{{- if kindIs "map" $entries -}}
+{{- $list := list -}}
+{{- range $entry := $entries -}}
+{{- $list = append $list $entry -}}
+{{- end -}}
+{{- $entries = $list -}}
+{{- end -}}
+{{- toJson $entries -}}
+{{- end -}}
+
+{{/*
 Pod security context shared by the credential-generation Jobs. The explicit
 runAsNonRoot requirement applies to both the default OpenShift path and the
 numeric security context used by Kind profiles.
