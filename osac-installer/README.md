@@ -737,10 +737,12 @@ render.) Invalid values — wrong types, negative numbers where only
 zero-or-positive is allowed, unknown keys in schema-closed sections —
 fail the install before any namespace, secret, or release is created,
 and before any readiness wait. Unknown-key rejection depends on the
-chart's schema: the `osac` chart is closed, while `osac-infra` leaves
-a few sections (`keycloak`, `topolvm`) open, so a typo there is
-accepted rather than rejected. The failure names the offending field
-and the violated constraint; fix the reported value and retry.
+section, in both charts: some sections are closed (for example
+`global.fulfillmentTrust`), while others — `osac-infra`'s `keycloak`
+and `topolvm`, or resource blocks like `operator.resources.requests`
+— remain open, so a typo there is accepted rather than rejected.
+The failure names the offending field and the violated constraint;
+fix the reported value and retry.
 
 The gate validates static inputs only. It does not check that the cluster is
 ready for the installation: prerequisites that must already exist (issuers,
