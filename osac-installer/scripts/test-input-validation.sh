@@ -288,6 +288,46 @@ grep -q 'could not determine the OpenShift version' "${TMP_DIR}/inj.err" \
   || fail "injection: the failure did not name the version lookup"
 assert_prevalidation_commands injection
 
+# NS is interpolated into recipe command text after the gate, so the gate
+# must reject a namespace carrying shell metacharacters before any of that
+# text is expanded. The sentinel file proves nothing executed.
+echo "checking ns-injection (metacharacters in NS fail the gate)"
+ns_sentinel="${TMP_DIR}/ns-injection-ran"
+: >"${LOG}"
+if MOCK_LOG="${LOG}" PATH="${STUB_BIN}:${PATH}" \
+  make -C "${SANDBOX}" --no-print-directory validate-inputs \
+  PLATFORM=kind PROFILE=dev "NS=osac;touch ${ns_sentinel}" \
+  >"${TMP_DIR}/ns.out" 2>"${TMP_DIR}/ns.err"; then
+  fail "ns-injection: the gate accepted a metacharacter-bearing NS"
+fi
+[ ! -e "${ns_sentinel}" ] \
+  || fail "ns-injection: NS executed as shell code"
+grep -q 'NS must be a lowercase DNS label' "${TMP_DIR}/ns.err" \
+  || fail "ns-injection: the failure did not name the namespace rule"
+assert_prevalidation_commands ns-injection
+
+# The dry run prints rendered manifests to the terminal and to collected
+# CI logs, so every dry-run render is piped through the Secret-payload
+# redactor; an unpiped render could leak credentials supplied through a
+# values overlay.
+echo "checking dry-run-redaction wiring (every dry-run render is redacted)"
+for dry_platform in kind openshift; do
+  dry_plan="${TMP_DIR}/dryrun-${dry_platform}.plan"
+  MOCK_LOG="${LOG}" PATH="${STUB_BIN}:${PATH}" \
+    make -C "${SANDBOX}" --no-print-directory -n install-dry-run \
+    PLATFORM="${dry_platform}" PROFILE=dev NS=osac \
+    DRY_RUN_CLUSTER_DOMAIN=apps.example.com DRY_RUN_OCP_VERSION=4.22 \
+    >"${dry_plan}" 2>/dev/null \
+    || fail "make -n install-dry-run (${dry_platform}) failed"
+  dry_renders=$(join_continuations <"${dry_plan}" | grep -c 'helm template')
+  dry_redacted=$(join_continuations <"${dry_plan}" | grep 'helm template' \
+    | grep -c 'redact-secret-values')
+  [ "${dry_renders}" -gt 0 ] \
+    || fail "install-dry-run (${dry_platform}): no renders in the plan"
+  [ "${dry_renders}" = "${dry_redacted}" ] \
+    || fail "install-dry-run (${dry_platform}): a render skips Secret redaction"
+done
+
 # Remote-cluster inputs: the gate must reject invalid static identifiers
 # before any cluster mutation -- install-osac's own re-check runs only after
 # install-infra and namespace creation have already changed the cluster.
@@ -602,7 +642,7 @@ if render_osac_chart_offline offline-validation-placeholder \
 fi
 grep -q 'identity mismatch' "${netbox_gate_err}" \
   || fail "netbox-key-mismatch: the failure did not name the identity mismatch"
-grep -q 'api-token' "${netbox_gate_err}" \
+grep -Fq 'osac chart reads Secret netbox-api-token/api-token' "${netbox_gate_err}" \
   || fail "netbox-key-mismatch: the failure did not name the divergent key"
 
 echo "checking netbox-name-mismatch (seeded name differs from the chart's name)"
@@ -616,6 +656,8 @@ if render_osac_chart_offline offline-validation-placeholder \
 fi
 grep -q 'identity mismatch' "${netbox_gate_err}" \
   || fail "netbox-name-mismatch: the failure did not name the identity mismatch"
+grep -Fq 'osac chart reads Secret other-token/' "${netbox_gate_err}" \
+  || fail "netbox-name-mismatch: the failure did not name the divergent Secret name"
 
 # Without the seed hook nothing creates the token Secret, so the same
 # lookup failure is a real input error: the bridge must not paper over it,
@@ -667,12 +709,41 @@ grep -Eiq "${numeric_token_pattern}" "${netbox_gate_err}" \
   || fail "netbox-file-numeric-token: the failure did not name the token type"
 
 # A valid file-supplied token renders unmasked (the bridge is not taken).
-printf 'bmf:\n  netbox:\n    tokenValue: file-supplied-token\n' >"${TMP_DIR}/netbox-token.yaml"
+# The token is generated at runtime so no credential-looking literal
+# lives in this suite.
+file_supplied_token="file-supplied-token-$(date +%s)-$$"
+printf 'bmf:\n  netbox:\n    tokenValue: %s\n' "${file_supplied_token}" \
+  >"${TMP_DIR}/netbox-token.yaml"
 echo "checking netbox-file-string-token (expected success)"
 render_osac_chart_offline offline-validation-placeholder \
   osac "${OSAC_CHART_DIR}" --values "${OSAC_CHART_DIR}/ci/default-values.yaml" \
   "${NETBOX_PROFILE_ARGS[@]}" \
   -f "${TMP_DIR}/netbox-token.yaml" \
   || fail "netbox-file-string-token: a valid file-supplied token must render"
+
+# The dry run's rendered output reaches the terminal and CI logs, so
+# Secret payload values -- including a password supplied through a values
+# overlay -- must be masked. The overlay's token lands in the bmf NetBox
+# token Secret's stringData; the redactor masks it while the rest of the
+# manifest stays readable.
+echo "checking dry-run-secret-redaction (an overlay password stays out of dry-run output)"
+dryrun_token="dryrun-token-$(date +%s)-$$"
+printf 'bmf:\n  netbox:\n    tokenValue: %s\n' "${dryrun_token}" \
+  >"${TMP_DIR}/dryrun-token.yaml"
+if ! helm template dryrun-osac "${OSAC_CHART_DIR}" \
+    --values "${OSAC_CHART_DIR}/ci/default-values.yaml" \
+    --namespace osac \
+    "${NETBOX_PROFILE_ARGS[@]}" \
+    -f "${TMP_DIR}/dryrun-token.yaml" \
+    | "${SCRIPT_DIR}/redact-secret-values.sh" \
+    >"${TMP_DIR}/dryrun-rendered.yaml" 2>"${netbox_gate_err}"; then
+  fail "dry-run-secret-redaction: the osac chart render failed"
+fi
+grep -Fq "${dryrun_token}" "${TMP_DIR}/dryrun-rendered.yaml" \
+  && fail "dry-run-secret-redaction: the overlay's password reached the dry-run output"
+grep -q 'kind: Secret' "${TMP_DIR}/dryrun-rendered.yaml" \
+  || fail "dry-run-secret-redaction: the render produced no Secret to redact"
+grep -q ': <redacted>' "${TMP_DIR}/dryrun-rendered.yaml" \
+  || fail "dry-run-secret-redaction: no Secret payload was masked"
 
 echo "input validation passed"

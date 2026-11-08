@@ -56,6 +56,26 @@ validate_remote_kubeconfig_secret() {
     return 0
 }
 
+# Validate the target namespace before NS is interpolated into any later
+# recipe command text. The value reaches this validator through the
+# exported environment (never through Make expansion into command text),
+# so it cannot break out of this quoting either; once it passes, every
+# later $(NS) interpolation is known to carry namespace-safe characters.
+# The value itself is deliberately not echoed back: a rejected name could
+# carry control characters that corrupt the log.
+validate_namespace() {
+    local ns="$1"
+    local LC_ALL=C
+
+    if (( ${#ns} == 0 || ${#ns} > 63 )) || \
+        [[ ! "${ns}" =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]]; then
+        echo "ERROR: NS must be a valid namespace name: a lowercase DNS label of at most 63 characters (a-z, 0-9, and '-', starting and ending with a-z or 0-9)." >&2
+        return 1
+    fi
+
+    return 0
+}
+
 # Render the osac chart offline for the input-validation gate, bridging the
 # NetBox lookup branch. helm template cannot see cluster Secrets (lookup
 # returns nil offline), so a profile relying on the install-time
@@ -186,13 +206,25 @@ netbox_seed_check() {
     if render=$(helm template "$@" 2>/dev/null); then
         case "${render}" in
             *-netbox-token-seed*)
+                # Scoped to the seed Job's own document: other rendered
+                # resources (e.g. the NetBox Deployment's extraEnvs) can
+                # carry env entries named SECRET_NAME or OPERATOR_NS, and
+                # search state must not leak across document boundaries.
                 NETBOX_SEED_SECRET_NS=$(printf '%s\n' "${render}" \
-                    | awk '/^ *- name: OPERATOR_NS$/ { want = 1; next }
-                           want && /^ *value: / && !done {
+                    | awk '/^---$/ { in_seed = 0; want = 0; kind = ""; next }
+                           /^kind: / { kind = $2 }
+                           /^  name: / && kind == "Job" \
+                               && /-netbox-token-seed$/ { in_seed = 1; next }
+                           in_seed && /^ *- name: OPERATOR_NS$/ { want = 1; next }
+                           in_seed && want && /^ *value: / && !done {
                                gsub(/"/, "", $2); print $2; done = 1 }')
                 NETBOX_SEED_SECRET_NAME=$(printf '%s\n' "${render}" \
-                    | awk '/^ *- name: SECRET_NAME$/ { want = 1; next }
-                           want && /^ *value: / && !done {
+                    | awk '/^---$/ { in_seed = 0; want = 0; kind = ""; next }
+                           /^kind: / { kind = $2 }
+                           /^  name: / && kind == "Job" \
+                               && /-netbox-token-seed$/ { in_seed = 1; next }
+                           in_seed && /^ *- name: SECRET_NAME$/ { want = 1; next }
+                           in_seed && want && /^ *value: / && !done {
                                gsub(/"/, "", $2); print $2; done = 1 }')
                 NETBOX_SEED_SECRET_KEY=$(printf '%s\n' "${render}" \
                     | awk '/^  netbox-token-seed\.sh:/ { in_script = 1; next }

@@ -191,7 +191,10 @@ make install PLATFORM=openshift PROFILE=vmaas-ci NS=osac DRY_RUN=1 \
 release. It skips Kind cluster creation, `oc`/`kubectl` operations, and the
 dev-full host setup script. Since `helm template` does not connect to a cluster,
 no Kubernetes resources are changed. The generated manifests are printed to
-the terminal; `EXTRA_HELM_ARGS` still applies to the OSAC chart. Do not include a
+the terminal with Secret payload values (`data`/`stringData`) redacted by
+`scripts/redact-secret-values.sh`, so credentials supplied through values
+overlays do not reach the terminal or CI logs; `EXTRA_HELM_ARGS` still applies
+to the OSAC chart. Do not include a
 Helm `--dry-run` flag in `EXTRA_HELM_ARGS`; rendering is intrinsic to this mode.
 
 #### Two-cluster VMaaS installation (OpenShift)
