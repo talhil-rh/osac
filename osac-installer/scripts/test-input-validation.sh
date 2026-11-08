@@ -320,6 +320,24 @@ grep -q 'NS must be a lowercase DNS label' "${TMP_DIR}/ns.err" \
   || fail "ns-injection: the failure did not name the namespace rule"
 assert_prevalidation_commands ns-injection
 
+# NS is frozen verbatim before it is exported, so a Make expression in a
+# caller value must not expand at parse time -- before the gate can reject
+# the value. The sentinel file proves no $(shell ...) side effect ran, and
+# the gate must reject the raw expression as an invalid namespace.
+echo "checking ns-injection-make (Make expressions in NS stay data)"
+: >"${LOG}"
+if MOCK_LOG="${LOG}" PATH="${STUB_BIN}:${PATH}" \
+  make -C "${SANDBOX}" --no-print-directory validate-inputs \
+  PLATFORM=kind PROFILE=dev "NS=osac\$(shell touch ${ns_sentinel}-make)" \
+  >"${TMP_DIR}/nsmake.out" 2>"${TMP_DIR}/nsmake.err"; then
+  fail "ns-injection-make: the gate accepted a Make-expression-bearing NS"
+fi
+[ ! -e "${ns_sentinel}-make" ] \
+  || fail "ns-injection-make: a Make expression in NS executed"
+grep -q 'NS must be a lowercase DNS label' "${TMP_DIR}/nsmake.err" \
+  || fail "ns-injection-make: the failure did not name the namespace rule"
+assert_prevalidation_commands ns-injection-make
+
 # Caller-supplied Helm args are data, never command text: EXTRA_HELM_ARGS
 # is frozen verbatim (no Make expression in it expands, including at
 # export time) and reaches recipes through the environment, so both Make
@@ -844,18 +862,24 @@ grep -Fq 'netbox.internal.example.com' "${netbox_gate_err}" \
 # lookup failure is a real input error unless the Secret already exists in
 # the cluster: the bridge must not paper over a genuinely missing token,
 # or the gate would pass an install that fails only after install-infra
-# changed the cluster. The stub CLIs answer nothing here (no Secret).
+# changed the cluster. The stub CLIs answer nothing here (no Secret). The
+# gate names the constraint without the chart's raw error, which embeds
+# the customer-supplied Secret name and key.
 echo "checking netbox-unseeded-bridge (no seed hook and no Secret: the token error is real)"
 if PATH="${netbox_cli_bin}:${PATH}" NETBOX_CLI_LOG="${netbox_cli_log}" \
     NETBOX_TOKEN_SEEDED=0 render_osac_chart_offline "${offline_token}" \
     osac "${OSAC_CHART_DIR}" --values "${OSAC_CHART_DIR}/ci/default-values.yaml" \
     --namespace osac \
     "${NETBOX_PROFILE_ARGS[@]}" \
+    --set bmf.secrets.netboxToken=netbox.internal.example.com \
     2>"${netbox_gate_err}"; then
   fail "netbox-unseeded-bridge: the gate bridged a missing token with no seed hook"
 fi
-grep -Eiq 'netbox\.tokenValue is required when Secret' "${netbox_gate_err}" \
+grep -Eiq 'netbox\.tokenValue is required when the NetBox token Secret' \
+  "${netbox_gate_err}" \
   || fail "netbox-unseeded-bridge: the failure did not name the missing token"
+grep -Fq 'netbox.internal.example.com' "${netbox_gate_err}" \
+  && fail "netbox-unseeded-bridge: the failure echoed the Secret name"
 
 # A token Secret that already exists in the cluster is the other
 # legitimate unseeded source: `helm upgrade` reads it through lookup at
@@ -898,7 +922,8 @@ if PATH="${netbox_cli_bin}:${PATH}" NETBOX_CLI_LOG="${netbox_cli_log}" \
     2>"${netbox_gate_err}"; then
   fail "netbox-existing-secret-wrong-key: the gate bridged a Secret without the chart's key"
 fi
-grep -Eiq 'netbox\.tokenValue is required when Secret' "${netbox_gate_err}" \
+grep -Eiq 'netbox\.tokenValue is required when the NetBox token Secret' \
+  "${netbox_gate_err}" \
   || fail "netbox-existing-secret-wrong-key: the failure did not name the missing token"
 
 # A caller-supplied token must reach the gate's render, never be masked by
@@ -1281,6 +1306,69 @@ helm template osac-infra "${INFRA_CHART_DIR}" \
   || fail "dry-run-role-render-redaction: the infra render failed"
 grep -Fq 'netbox.internal.example.com' "${TMP_DIR}/dryrun-role-render.yaml" \
   && fail "dry-run-role-render-redaction: the seed Role Secret name reached the dry run"
+
+# Certificate dnsNames and commonName, Route hosts, and Gateway API route
+# hostnames carry the caller-supplied keycloak route hostname and cluster
+# domain, so entries that are not cluster-internal names are masked; bare
+# service names and service.namespace pairs stay readable so the SAN sets
+# and routes remain reviewable. Helm renders template comments inside
+# these lists, so the list reader must skip them without ending the list.
+echo "checking dry-run-hostname-redaction (caller hostnames stay out)"
+printf '%s\n' 'kind: Certificate' 'spec:' \
+  '  commonName: keycloak-keycloak.apps.internal.example.com' \
+  '  dnsNames:' '  - keycloak' '  - openbao.c3i' \
+  '  - keycloak-keycloak.apps.internal.example.com' \
+  'kind: Certificate' 'spec:' \
+  '  dnsNames: [osac-kafka.osac-kafka.svc, mgt.hub.internal.example.com]' \
+  'kind: Route' 'spec:' \
+  '  host: keycloak-keycloak.apps.internal.example.com' \
+  'kind: TLSRoute' 'spec:' '  hostnames:' \
+  '    # comment inside the list' \
+  '    - keycloak-keycloak.apps.internal.example.com' \
+  '  rules: []' \
+  | "${SCRIPT_DIR}/redact-secret-values.sh" >"${TMP_DIR}/dryrun-hostnames.yaml"
+grep -Fq 'keycloak-keycloak.apps.internal.example.com' \
+  "${TMP_DIR}/dryrun-hostnames.yaml" \
+  && fail "dry-run-hostname-redaction: a caller hostname was kept"
+grep -Fq 'mgt.hub.internal.example.com' "${TMP_DIR}/dryrun-hostnames.yaml" \
+  && fail "dry-run-hostname-redaction: a flow-list caller hostname was kept"
+grep -Fq 'commonName: <redacted>' "${TMP_DIR}/dryrun-hostnames.yaml" \
+  || fail "dry-run-hostname-redaction: the commonName was not masked"
+grep -Fq 'host: <redacted>' "${TMP_DIR}/dryrun-hostnames.yaml" \
+  || fail "dry-run-hostname-redaction: the Route host was not masked"
+grep -Fq '    - <redacted>' "${TMP_DIR}/dryrun-hostnames.yaml" \
+  || fail "dry-run-hostname-redaction: a list entry was not masked"
+grep -Fq '  - keycloak' "${TMP_DIR}/dryrun-hostnames.yaml" \
+  || fail "dry-run-hostname-redaction: a bare service name was masked"
+grep -Fq '  - openbao.c3i' "${TMP_DIR}/dryrun-hostnames.yaml" \
+  || fail "dry-run-hostname-redaction: a service.namespace name was masked"
+grep -Fq 'osac-kafka.osac-kafka.svc' "${TMP_DIR}/dryrun-hostnames.yaml" \
+  || fail "dry-run-hostname-redaction: a flow-list service name was masked"
+grep -Fq '# comment inside the list' "${TMP_DIR}/dryrun-hostnames.yaml" \
+  || fail "dry-run-hostname-redaction: a list comment was dropped"
+
+# The same rules through the chart path: the keycloak route hostname
+# reaches the keycloak-tls Certificate SANs, the TLSRoute SNI list, and
+# the keycloak Route host, so an internal domain set through
+# keycloak.route.hostname must not survive the dry-run render.
+echo "checking dry-run-hostname-render-redaction (keycloak route hostname stays out)"
+if ! helm template osac-infra "${INFRA_CHART_DIR}" \
+  --namespace osac-infra \
+  --values "${INSTALLER_DIR}/values/dev/kind-infra.yaml" \
+  --set keycloak.enabled=true \
+  --set keycloak.hostname=https://keycloak-keycloak.apps.internal.example.com \
+  --set keycloak.route.hostname=keycloak-keycloak.apps.internal.example.com \
+  2>/dev/null \
+  | "${SCRIPT_DIR}/redact-secret-values.sh" \
+  >"${TMP_DIR}/dryrun-hostnames-render.yaml"; then
+  fail "dry-run-hostname-render-redaction: the infra render failed"
+fi
+grep -Fq 'keycloak-keycloak.apps.internal.example.com' \
+  "${TMP_DIR}/dryrun-hostnames-render.yaml" \
+  && fail "dry-run-hostname-render-redaction: the keycloak route hostname reached the dry run"
+grep -Fq 'keycloak.keycloak.svc.cluster.local' \
+  "${TMP_DIR}/dryrun-hostnames-render.yaml" \
+  || fail "dry-run-hostname-render-redaction: a fixed SAN entry was masked"
 
 # The extra-env values live in a Secret, and Kubernetes does not refresh
 # Secret-backed env entries in a running container, so the pod template

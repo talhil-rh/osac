@@ -130,7 +130,7 @@ render_osac_chart_offline() {
             fi
             if ! netbox_existing_secret_matches "${bridged}" \
                 "${placeholder_token}"; then
-                printf '%s\n' "${err}" >&2
+                echo "ERROR: netbox.tokenValue is required when the NetBox token Secret is neither seeded by the infra hook nor present in the cluster; no cluster changes were made. Supply bmf.netbox.tokenValue, pre-create the Secret the osac chart reads (bmf.secrets.netboxToken, bmf.netbox.tokenSecretKey), or install the netbox profile's infra release first. The Secret name and key are deliberately not printed: they are customer-supplied identifiers that can carry internal hostnames." >&2
                 return 1
             fi
             return 0

@@ -111,8 +111,12 @@ $(error NS is required (namespace for OSAC instance, e.g. NS=osac))
 endif
 # NS is validated by the input-validation gate through the exported
 # environment -- never through Make expansion into command text -- so a
-# value carrying shell metacharacters cannot execute; once it passes,
-# every later $(NS) interpolation in recipe text is namespace-safe.
+# value carrying shell metacharacters cannot execute. Freezing the value
+# verbatim (like INFRA_VALUES_EXTRA below) also keeps Make expressions
+# such as $(shell ...) from running at expansion time, before the gate
+# can reject the value; once it passes, every later $(NS) interpolation
+# in recipe text is namespace-safe.
+override NS := $(value NS)
 export NS
 ifeq ($(PLATFORM),kind)
 ifeq ($(filter $(PROFILE),dev dev-full),)
