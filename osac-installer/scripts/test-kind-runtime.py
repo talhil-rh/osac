@@ -970,6 +970,13 @@ create_cluster osac-dev config.yaml {shlex.quote(str(self.directory / 'cluster.k
         infra = installer / "charts/osac-infra"
         infra.mkdir(parents=True)
         shutil.copy(INSTALLER / "Makefile", installer / "Makefile")
+        # install-infra validates NS through validate-ns before its Helm
+        # dependency prerequisites run, so the sandbox needs the library
+        # the Makefile sources for that check (lib.sh also sources oc.sh).
+        scripts = installer / "scripts"
+        scripts.mkdir()
+        shutil.copy(INSTALLER / "scripts/lib.sh", scripts / "lib.sh")
+        shutil.copy(INSTALLER / "scripts/oc.sh", scripts / "oc.sh")
         shutil.copy(INSTALLER / "charts/osac-infra/Chart.yaml", infra / "Chart.yaml")
         # One pinned archive per dependency declared in Chart.yaml; the Makefile
         # derives its build targets from the same list.
