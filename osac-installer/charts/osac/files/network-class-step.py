@@ -85,7 +85,9 @@ def _network(value: str, field: str) -> ipaddress.IPv4Network:
     try:
         return ipaddress.IPv4Network(value, strict=True)
     except (ValueError, TypeError):
-        raise StepError(f"{field} must be a canonical IPv4 CIDR (got {value})") from None
+        # The value stays out of the message: the step's log is collected on
+        # failure, and the CIDR is customer infrastructure data.
+        raise StepError(f"{field} must be a canonical IPv4 CIDR (host bits must be zero)") from None
 
 
 def prefix_limit(plan: dict) -> int:
@@ -144,9 +146,11 @@ def validate(inp: dict) -> None:
     excluded = [
         _network(cidr, "global.networking.excludedIpv4Cidrs entry") for cidr in inp.get("excluded_ipv4_cidrs") or []
     ]
-    for cidr in excluded:
+    for i, cidr in enumerate(excluded):
         if cidr.overlaps(vn):
-            raise StepError(f"excludedIpv4Cidrs range {cidr} overlaps the default VirtualNetwork CIDR {vn}")
+            # The CIDRs stay out of the message: the step's log is collected
+            # on failure, and both ranges are customer infrastructure data.
+            raise StepError(f"excludedIpv4Cidrs[{i}] overlaps the default VirtualNetwork CIDR")
 
 
 def _rules(rules: list | None) -> list:
