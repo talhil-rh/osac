@@ -1050,10 +1050,13 @@ rollout_b=$(extra_env_rollout "${TMP_DIR}/rollout-b.yaml")
   || fail "keycloak-extra-env-rollout: the rollout annotation depends on the env values"
 grep -q 'sha256\|checksum' <<<"${rollout_a}" \
   && fail "keycloak-extra-env-rollout: the rollout annotation exposes a value hash"
+# Plain grep (no -q) so the consumer reads the full stream and Helm is
+# never cut short by an early-exiting reader: with pipefail, a SIGPIPEd
+# Helm would flip the pipeline status and mask the failure.
 helm template osac-infra "${INFRA_CHART_DIR}" \
   --namespace osac-infra \
   --values "${INSTALLER_DIR}/values/vmaas-ci/infra.yaml" 2>/dev/null \
-  | grep -q 'rollout/extra-env' \
+  | grep 'rollout/extra-env' >/dev/null \
   && fail "keycloak-extra-env-rollout: the rollout annotation appears without extraEnv"
 
 # Internal endpoint URLs reach the dry run as plain env values too (for
@@ -1103,5 +1106,35 @@ grep -q 'image: quay.io/sclorg' "${TMP_DIR}/dryrun-registry-rendered.yaml" \
   || fail "dry-run-image-registry-redaction: a public registry image was masked"
 grep -q 'image: ghcr.io/openbao' "${TMP_DIR}/dryrun-registry-rendered.yaml" \
   || fail "dry-run-image-registry-redaction: a public registry image was masked"
+
+# The MCE image-overrides ConfigMap carries registry hostnames in its
+# manifest data (the image-remote fields); the dry run must mask it like
+# the other endpoint-config ConfigMaps, keeping the ConfigMap name and
+# entry keys readable.
+echo "checking dry-run-mce-registry-redaction (MCE override registries stay out)"
+mce_reg="mce-registry-internal-$(date +%s)-$$.internal.example.com"
+cat >"${TMP_DIR}/dryrun-mce.yaml" <<MCE_EOF
+mce:
+  enabled: true
+  imageOverrides:
+    - image-name: assisted-service
+      image-remote: ${mce_reg}
+      image-digest: sha256:c007ecc530f4bb0a43814f4373bdec6e27d1fa3698554b0935a07c086802e479
+      image-key: assisted_service_9
+MCE_EOF
+if ! helm template osac-infra "${INFRA_CHART_DIR}" \
+    --namespace osac-infra \
+    --values "${INSTALLER_DIR}/values/vmaas-ci/infra.yaml" \
+    -f "${TMP_DIR}/dryrun-mce.yaml" \
+    | "${SCRIPT_DIR}/redact-secret-values.sh" \
+    >"${TMP_DIR}/dryrun-mce-rendered.yaml" 2>>"${netbox_gate_err}"; then
+  fail "dry-run-mce-registry-redaction: the osac-infra chart render failed"
+fi
+grep -Fq "${mce_reg}" "${TMP_DIR}/dryrun-mce-rendered.yaml" \
+  && fail "dry-run-mce-registry-redaction: an internal registry hostname reached the dry-run output"
+grep -q 'name: osac-infra-mce-image-overrides' "${TMP_DIR}/dryrun-mce-rendered.yaml" \
+  || fail "dry-run-mce-registry-redaction: the MCE overrides ConfigMap is missing"
+grep -q 'manifest.json: <redacted>' "${TMP_DIR}/dryrun-mce-rendered.yaml" \
+  || fail "dry-run-mce-registry-redaction: the overrides manifest was not masked"
 
 echo "input validation passed"

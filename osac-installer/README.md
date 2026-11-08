@@ -200,9 +200,11 @@ of image references that do not point at a well-known public registry
 (image overrides carry internal registry hostnames; the repository and
 tag stay readable), and the AAP
 instance-group endpoint config (the AAP instance-group ConfigMaps named
-`*-ig`, which carry EVPN/Netris controller URLs from values overlays, and
-the `osac-infra-evpn-config` ConfigMap, which carries internal node
-hostnames and fabric peer addresses) redacted by
+`*-ig`, which carry EVPN/Netris controller URLs from values overlays, the
+`osac-infra-evpn-config` ConfigMap, which carries internal node
+hostnames and fabric peer addresses, and the
+`osac-infra-mce-image-overrides` ConfigMap, which carries MCE image
+override registry hostnames) redacted by
 `scripts/redact-secret-values.sh`, so credentials and internal hostnames
 supplied through values overlays do not reach the terminal or CI logs.
 The `helm` commands themselves are not echoed, so an inline `--set`

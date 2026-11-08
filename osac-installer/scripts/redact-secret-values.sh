@@ -6,9 +6,11 @@
 # overlays, including multi-line block scalars such as PEM keys); the data
 # of the endpoint-config ConfigMaps -- the AAP instance-group maps (`*-ig`,
 # carrying EVPN/Netris controller URLs and any credential misplaced there
-# instead of the parallel Secret) and the EVPN fabric config map
+# instead of the parallel Secret), the EVPN fabric config map
 # (`osac-infra-evpn-config`, carrying internal node hostnames and fabric
-# peer addresses); container env entry values whose variable name is
+# peer addresses), and the MCE image-overrides map
+# (`osac-infra-mce-image-overrides`, carrying registry hostnames in its
+# manifest); container env entry values whose variable name is
 # credential-shaped (PASSWORD/SECRET/TOKEN/ACCESS_KEY/AUTH/...) or
 # endpoint-shaped (URL/HOST/ADDR/...), which callers can inject into
 # workload specs as plain text instead of Secret references; and the
@@ -33,7 +35,8 @@ awk '
 /^kind: / { kind = $2; print; next }
 !in_payload && /^  name: / {
     if (kind == "ConfigMap" \
-        && ($2 ~ /-ig$/ || $2 == "osac-infra-evpn-config")) {
+        && ($2 ~ /-ig$/ || $2 == "osac-infra-evpn-config" \
+            || $2 == "osac-infra-mce-image-overrides")) {
         endpoint_configmap = 1
     }
     print; next
