@@ -874,6 +874,13 @@ printf '%s\n' 'kind: Secret' 'stringData:' '  tls.crt: |' \
   | "${SCRIPT_DIR}/redact-secret-values.sh" \
   | grep -Fq -- "-----BEGIN ${multiline_token}-----" \
   && fail "dry-run-multiline-secret-redaction: the redactor kept a block-scalar body"
+# A Secret payload entry keyed `name` must be masked like any other
+# payload value, not mistaken for the document's metadata name.
+printf '%s\n' 'kind: Secret' 'metadata:' '  name: tls' 'stringData:' \
+  "  name: ${multiline_token}-name-key" \
+  | "${SCRIPT_DIR}/redact-secret-values.sh" \
+  | grep -Fq -- "${multiline_token}-name-key" \
+  && fail "dry-run-multiline-secret-redaction: a payload entry named name leaked"
 
 # The EVPN/Netris overlay carries internal infrastructure hostnames into
 # the AAP instance-group ConfigMaps (`*-ig`); the dry run must mask that
@@ -899,5 +906,44 @@ grep -q 'kind: ConfigMap' "${TMP_DIR}/dryrun-evpn-rendered.yaml" \
   || fail "dry-run-evpn-endpoint-redaction: the render produced no ConfigMap"
 grep -q 'NETRIS_CONTROLLER_URL: <redacted>' "${TMP_DIR}/dryrun-evpn-rendered.yaml" \
   || fail "dry-run-evpn-endpoint-redaction: the endpoint config was not masked"
+
+# The EVPN fabric config (the osac-infra-evpn-config ConfigMap) carries
+# internal node hostnames and fabric peer addresses from the infra
+# overlay; the dry run must mask that data too, while the ConfigMap and
+# its entry keys stay visible for review.
+echo "checking dry-run-evpn-fabric-redaction (infra node hostnames stay out)"
+evpn_node="lab-worker-$(date +%s)-$$.internal.example.com"
+cat >"${TMP_DIR}/dryrun-evpn-fabric.yaml" <<EVPN_EOF
+evpn:
+  enabled: true
+  vtepCIDR: 10.200.255.0/24
+  bgp:
+    asn: 4209999999
+    acceptPrefixes:
+      - 10.200.255.0/24
+  nodes:
+    - name: ${evpn_node}
+      vtepIP: 10.200.255.1
+      uplinks:
+        - interface: ens6
+          peerAddress: 169.254.133.1
+          peerASN: 4200300002
+EVPN_EOF
+if ! helm template osac-infra "${INFRA_CHART_DIR}" \
+    --namespace osac-infra \
+    --values "${INSTALLER_DIR}/values/vmaas-ci/infra.yaml" \
+    -f "${TMP_DIR}/dryrun-evpn-fabric.yaml" \
+    | "${SCRIPT_DIR}/redact-secret-values.sh" \
+    >"${TMP_DIR}/dryrun-evpn-fabric-rendered.yaml" 2>>"${netbox_gate_err}"; then
+  fail "dry-run-evpn-fabric-redaction: the osac-infra chart render failed"
+fi
+grep -Fq "${evpn_node}" "${TMP_DIR}/dryrun-evpn-fabric-rendered.yaml" \
+  && fail "dry-run-evpn-fabric-redaction: an internal node hostname reached the dry-run output"
+grep -Fq '169.254.133.1' "${TMP_DIR}/dryrun-evpn-fabric-rendered.yaml" \
+  && fail "dry-run-evpn-fabric-redaction: a fabric peer address reached the dry-run output"
+grep -q 'name: osac-infra-evpn-config' "${TMP_DIR}/dryrun-evpn-fabric-rendered.yaml" \
+  || fail "dry-run-evpn-fabric-redaction: the EVPN config ConfigMap is missing"
+grep -q 'nodes.txt: <redacted>' "${TMP_DIR}/dryrun-evpn-fabric-rendered.yaml" \
+  || fail "dry-run-evpn-fabric-redaction: the node list was not masked"
 
 echo "input validation passed"
