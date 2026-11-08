@@ -699,10 +699,14 @@ done
 # runAsUser 0 with the default runAsNonRoot true only fails at
 # provisioning -- the kubelet refuses to start a root container flagged
 # non-root -- so the schema rejects the combination up front. UID 0
-# stays allowed when runAsNonRoot is explicitly false.
+# stays allowed when runAsNonRoot is explicitly false. The `not` keyword
+# wording differs by Helm version: 3.18 prints "Must not validate the
+# schema (not)" with the dotted path while 3.22 (what CI installs)
+# prints "'not' failed" with a JSON-pointer path; the pattern accepts
+# both, in the dotted-path (Helm 3) and JSON-pointer (newer) spellings.
 render_infra_failure_matching \
   vault-runasuser-zero-nonroot \
-  '(bundledVault\.podSecurityContext|/bundledVault/podSecurityContext).*(not validate|runAsNonRoot)' \
+  '(bundledVault\.podSecurityContext|/bundledVault/podSecurityContext).*(not validate|not. failed)' \
   --set bundledVault.podSecurityContext.runAsUser=0
 
 render_infra_success \
