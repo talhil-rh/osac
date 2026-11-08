@@ -204,12 +204,14 @@ netbox_existing_secret_matches() {
 
 # Compare the NetBox token Secret identity the osac chart renders with the
 # seed hook's identity exported by netbox_seed_check. Any mismatch fails
-# the gate before a cluster change; the message names both identities so
-# the caller can see which override diverged.
+# the gate before a cluster change; the message names which identity
+# fields differ, never their values -- Secret names and keys are
+# customer-supplied and can carry internal identifiers, and the gate's
+# errors reach the terminal and CI logs.
 # Usage: netbox_seed_identity_matches RENDER PLACEHOLDER_TOKEN
 netbox_seed_identity_matches() {
     local render="$1" placeholder="$2"
-    local identity bmf_name bmf_ns bmf_key
+    local identity bmf_name bmf_ns bmf_key differing=""
     identity=$(netbox_render_secret_identity "${render}" "${placeholder}")
     bmf_name=$(printf '%s\n' "${identity}" | sed -n 1p)
     bmf_ns=$(printf '%s\n' "${identity}" | sed -n 2p)
@@ -218,10 +220,13 @@ netbox_seed_identity_matches() {
         echo "ERROR: could not determine which NetBox token Secret the osac chart reads; no cluster changes were made." >&2
         return 1
     fi
-    if [ "${bmf_name}" != "${NETBOX_SEED_SECRET_NAME}" ] \
-        || [ "${bmf_ns}" != "${NETBOX_SEED_SECRET_NS}" ] \
-        || [ "${bmf_key}" != "${NETBOX_SEED_SECRET_KEY}" ]; then
-        echo "ERROR: NetBox token Secret identity mismatch: the seed hook creates Secret ${NETBOX_SEED_SECRET_NAME}/${NETBOX_SEED_SECRET_KEY} in namespace ${NETBOX_SEED_SECRET_NS}, but the osac chart reads Secret ${bmf_name}/${bmf_key} in namespace ${bmf_ns}; no cluster changes were made. Align bmf.secrets.netboxToken, bmf.netbox.tokenSecretKey, and the namespaces with the infra seed hook (netbox.apiTokenSecret, osacNamespace)." >&2
+    [ "${bmf_name}" != "${NETBOX_SEED_SECRET_NAME}" ] && differing="name"
+    [ "${bmf_ns}" != "${NETBOX_SEED_SECRET_NS}" ] \
+        && differing="${differing:+${differing}, }namespace"
+    [ "${bmf_key}" != "${NETBOX_SEED_SECRET_KEY}" ] \
+        && differing="${differing:+${differing}, }key"
+    if [ -n "${differing}" ]; then
+        echo "ERROR: NetBox token Secret identity mismatch (differing: ${differing}): the osac chart's NetBox token Secret settings (bmf.secrets.netboxToken, bmf.netbox.tokenSecretKey, and the release namespace) do not match the infra seed hook's (netbox.apiTokenSecret, osacNamespace); no cluster changes were made. Align the osac chart settings with the seed hook and retry. The differing values are deliberately not printed: they are customer-supplied Secret names and keys that can carry internal identifiers." >&2
         return 1
     fi
     return 0

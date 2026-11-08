@@ -804,34 +804,41 @@ render_osac_chart_offline "${offline_token}" \
 # that diverges from the seeded Secret (here the key, via
 # bmf.netbox.tokenSecretKey) would pass a bridged render yet fail the real
 # install only after install-infra changed the cluster. The gate fails
-# instead, naming both identities.
+# instead, naming the differing identity fields. The mismatching values
+# are internal-hostname-shaped on purpose: Secret names and keys are
+# customer-supplied identifiers, and the gate's errors reach the terminal
+# and CI logs, so the values themselves must stay out of the message.
 echo "checking netbox-key-mismatch (seeded key differs from the chart's key)"
 if render_osac_chart_offline "${offline_token}" \
     osac "${OSAC_CHART_DIR}" --values "${OSAC_CHART_DIR}/ci/default-values.yaml" \
     --namespace osac \
     "${NETBOX_PROFILE_ARGS[@]}" \
-    --set bmf.netbox.tokenSecretKey=api-token \
+    --set bmf.netbox.tokenSecretKey=token.netbox.internal.example.com \
     2>"${netbox_gate_err}"; then
   fail "netbox-key-mismatch: the gate bridged a mismatched Secret key"
 fi
 grep -q 'identity mismatch' "${netbox_gate_err}" \
   || fail "netbox-key-mismatch: the failure did not name the identity mismatch"
-grep -Fq 'osac chart reads Secret netbox-api-token/api-token' "${netbox_gate_err}" \
-  || fail "netbox-key-mismatch: the failure did not name the divergent key"
+grep -Fq 'differing: key' "${netbox_gate_err}" \
+  || fail "netbox-key-mismatch: the failure did not name the differing field"
+grep -Fq 'token.netbox.internal.example.com' "${netbox_gate_err}" \
+  && fail "netbox-key-mismatch: the failure echoed the divergent key"
 
 echo "checking netbox-name-mismatch (seeded name differs from the chart's name)"
 if render_osac_chart_offline "${offline_token}" \
     osac "${OSAC_CHART_DIR}" --values "${OSAC_CHART_DIR}/ci/default-values.yaml" \
     --namespace osac \
     "${NETBOX_PROFILE_ARGS[@]}" \
-    --set bmf.secrets.netboxToken=other-token \
+    --set bmf.secrets.netboxToken=netbox.internal.example.com \
     2>"${netbox_gate_err}"; then
   fail "netbox-name-mismatch: the gate bridged a mismatched Secret name"
 fi
 grep -q 'identity mismatch' "${netbox_gate_err}" \
   || fail "netbox-name-mismatch: the failure did not name the identity mismatch"
-grep -Fq 'osac chart reads Secret other-token/' "${netbox_gate_err}" \
-  || fail "netbox-name-mismatch: the failure did not name the divergent Secret name"
+grep -Fq 'differing: name' "${netbox_gate_err}" \
+  || fail "netbox-name-mismatch: the failure did not name the differing field"
+grep -Fq 'netbox.internal.example.com' "${netbox_gate_err}" \
+  && fail "netbox-name-mismatch: the failure echoed the divergent Secret name"
 
 # Without the seed hook nothing creates the token Secret, so the same
 # lookup failure is a real input error unless the Secret already exists in
@@ -1216,6 +1223,64 @@ for leaked in "${env_password}-direct" "${env_apikey}-aws" \
 done
 grep -q 'value: foreground' "${TMP_DIR}/dryrun-env-direct.yaml" \
   || fail "dry-run-env-redaction: the redactor masked a benign env value"
+
+# A sensitive env value rendered as a block scalar keeps its payload on the
+# indented lines after `value: |-` (a PEM in PRIVATE_KEY, a kubeconfig in
+# DOCKER_AUTH_CONFIG): the value line is masked and every body line is
+# dropped, with output resuming at the next env entry.
+echo "checking dry-run-env-block-redaction (block-scalar env bodies stay out)"
+printf '%s\n' 'kind: Deployment' 'spec:' '  template:' \
+  '    - name: APP_PASSWORD' '      value: |-' \
+  "        ${env_password}-block-one" "        ${env_password}-block-two" \
+  '    - name: APP_MODE' '      value: foreground' \
+  | "${SCRIPT_DIR}/redact-secret-values.sh" >"${TMP_DIR}/dryrun-env-block.yaml"
+for leaked in "${env_password}-block-one" "${env_password}-block-two"; do
+  grep -Fq "${leaked}" "${TMP_DIR}/dryrun-env-block.yaml" \
+    && fail "dry-run-env-block-redaction: a block-scalar body line was kept (${leaked})"
+done
+grep -Fq 'value: <redacted>' "${TMP_DIR}/dryrun-env-block.yaml" \
+  || fail "dry-run-env-block-redaction: the block-scalar value line was not masked"
+grep -q 'value: foreground' "${TMP_DIR}/dryrun-env-block.yaml" \
+  || fail "dry-run-env-block-redaction: output did not resume after the block"
+
+# RBAC rules that target Secrets name the Secret in resourceNames, and the
+# name is customer-supplied (netbox.apiTokenSecret carries internal
+# hostnames): Secret-scoped resourceNames are masked in both list forms,
+# while resourceNames of other kinds stay readable for RBAC review.
+echo "checking dry-run-role-redaction (Secret resourceNames stay out)"
+printf '%s\n' 'kind: Role' 'rules:' '- apiGroups: [""]' \
+  '  resources: ["secrets"]' \
+  '  resourceNames: ["netbox.internal.example.com"]' \
+  '  verbs: ["get"]' '- apiGroups:' '  - ""' '  resources:' '  - secrets' \
+  '  resourceNames:' '  - token.netbox.internal.example.com' \
+  '  verbs:' '  - get' '- apiGroups:' '  - ""' '  resources:' '  - configmaps' \
+  '  resourceNames:' '  - hub-access' '  verbs:' '  - get' \
+  | "${SCRIPT_DIR}/redact-secret-values.sh" >"${TMP_DIR}/dryrun-role-direct.yaml"
+for leaked in 'netbox.internal.example.com' 'token.netbox.internal.example.com'; do
+  grep -Fq "${leaked}" "${TMP_DIR}/dryrun-role-direct.yaml" \
+    && fail "dry-run-role-redaction: a Secret resourceName was kept (${leaked})"
+done
+grep -Fq 'resourceNames: [<redacted>]' "${TMP_DIR}/dryrun-role-direct.yaml" \
+  || fail "dry-run-role-redaction: a flow-list Secret resourceName was not masked"
+grep -Fq '  - <redacted>' "${TMP_DIR}/dryrun-role-direct.yaml" \
+  || fail "dry-run-role-redaction: a block-list Secret resourceName was not masked"
+grep -Fq '  - hub-access' "${TMP_DIR}/dryrun-role-direct.yaml" \
+  || fail "dry-run-role-redaction: a non-Secret resourceName was masked"
+
+# The same rule through the chart path: the netbox-token-seed hook Role is
+# the one dry-run document that names a caller-set Secret, so an internal
+# hostname set through netbox.apiTokenSecret must not survive the render.
+echo "checking dry-run-role-render-redaction (seed Role Secret name stays out)"
+helm template osac-infra "${INFRA_CHART_DIR}" \
+  --namespace osac-infra \
+  --values "${INSTALLER_DIR}/values/bmaas-ci/infra.yaml" \
+  --values "${INSTALLER_DIR}/values/bmaas-netbox-ci/infra.yaml" \
+  --set osacNamespace=osac \
+  --set netbox.apiTokenSecret=netbox.internal.example.com 2>/dev/null \
+  | "${SCRIPT_DIR}/redact-secret-values.sh" >"${TMP_DIR}/dryrun-role-render.yaml" \
+  || fail "dry-run-role-render-redaction: the infra render failed"
+grep -Fq 'netbox.internal.example.com' "${TMP_DIR}/dryrun-role-render.yaml" \
+  && fail "dry-run-role-render-redaction: the seed Role Secret name reached the dry run"
 
 # The extra-env values live in a Secret, and Kubernetes does not refresh
 # Secret-backed env entries in a running container, so the pod template

@@ -879,12 +879,14 @@ ifeq ($(PLATFORM),kind)
 		--namespace osac-infra \
 		-f $(INFRA_VALUES) $${INFRA_VALUES_EXTRA} \
 		--set osacNamespace=$(NS) \
+		$(INFRA_HELM_ARGS) \
 		$(OIDC_IDP_CA_HELM_ARGS) | scripts/redact-secret-values.sh
 else
 	@helm template osac-deps $(DEPS_CHART) \
 		--namespace osac-deps \
 		--values $(INFRA_VALUES) $${INFRA_VALUES_EXTRA} \
-		--set lvms.channel=stable-$(DRY_RUN_OCP_VERSION) | scripts/redact-secret-values.sh
+		--set lvms.channel=stable-$(DRY_RUN_OCP_VERSION) \
+		$(INFRA_HELM_ARGS) | scripts/redact-secret-values.sh
 	@helm template osac-infra $(INFRA_CHART) \
 		--namespace osac-infra \
 		--values $(INFRA_VALUES) $${INFRA_VALUES_EXTRA} \
@@ -894,6 +896,7 @@ else
 		--set keycloak.route.hostname=keycloak-keycloak.$(DRY_RUN_CLUSTER_DOMAIN) \
 		--set keycloak.uiUrl=https://osac-ui-$(NS).$(DRY_RUN_CLUSTER_DOMAIN) \
 		--set "bundledVault.keycloakIssuerUrl=https://keycloak-keycloak.$(DRY_RUN_CLUSTER_DOMAIN)/realms/osac" \
+		$(INFRA_HELM_ARGS) \
 		$(OIDC_IDP_CA_HELM_ARGS) | scripts/redact-secret-values.sh
 endif
 	@helm template osac $(if $(OSAC_CHART_OCI_REF),$(OSAC_CHART_OCI_REF)$(if $(OSAC_CHART_OCI_VERSION), --version $(OSAC_CHART_OCI_VERSION)),$(OSAC_CHART)) \
@@ -901,14 +904,17 @@ endif
 		--namespace $(NS) \
 		--set-string global.osacDeploymentId=$(NS)/osac \
 		$(if $(filter openshift,$(PLATFORM)),--set service.externalHostname=fulfillment-api-$(NS).$(DRY_RUN_CLUSTER_DOMAIN) --set service.internalHostname=fulfillment-internal-api-$(NS).$(DRY_RUN_CLUSTER_DOMAIN) --set global.clusterDomain=$(DRY_RUN_CLUSTER_DOMAIN) --set ui.auth.oidcIssuerURL=https://keycloak-keycloak.$(DRY_RUN_CLUSTER_DOMAIN)/realms/osac --set ui.externalHostname=osac-ui-$(NS).$(DRY_RUN_CLUSTER_DOMAIN)) \
+		$(INSTANCE_HELM_ARGS) \
 		$${EXTRA_HELM_ARGS} | scripts/redact-secret-values.sh
 ifeq ($(PROFILE),dev-full)
 	@helm dependency build charts/osac-devstack
 	@helm template osac-devstack charts/osac-devstack \
 		--namespace $(NS) \
+		-f $(INSTANCE_VALUES) $${INSTANCE_VALUES_EXTRA} \
 		--set osacNamespace=$(NS) \
 		--set kindClusterName=$(KIND_CLUSTER_NAME) \
-		--set ui.enabled=true | scripts/redact-secret-values.sh
+		--set ui.enabled=true \
+		$(DEVSTACK_HELM_ARGS) | scripts/redact-secret-values.sh
 endif
 
 .PHONY: install-multicluster

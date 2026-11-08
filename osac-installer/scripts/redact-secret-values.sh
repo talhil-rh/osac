@@ -19,9 +19,13 @@
 # workload specs as plain text instead of Secret references; and the
 # registry host of image references that do not point at a well-known
 # public registry, since image overrides carry internal registry
-# hostnames. Resource structure, Secret/ConfigMap names and keys, and
-# every other value stay readable so the dry run remains useful for
-# review.
+# hostnames; the resourceNames of RBAC rules that target Secrets --
+# netbox.apiTokenSecret is customer-supplied and carries the same
+# internal-identifier risk, so only Secret-scoped rules are masked and
+# other resourceNames stay readable. Block-scalar bodies of masked env
+# values are dropped with their value line. Resource structure,
+# Secret/ConfigMap names and keys, and every other value stay readable
+# so the dry run remains useful for review.
 set -euo pipefail
 
 # Helm renders each resource as a top-level document: kind and the data /
@@ -32,9 +36,13 @@ set -euo pipefail
 # applies outside payloads, so a payload entry named `name` falls through
 # to masking instead of printing its value. An env entry's `value:` line
 # always directly follows its `- name:` line in Helm's rendering, so the
-# credential-name check only has to look one line ahead.
+# credential-name check only has to look one line ahead; a block-scalar
+# value keeps its body on the following, deeper-indented lines, which are
+# dropped until a line at or shallower than the value line's indent ends
+# the block. RBAC rules list their target resources before resourceNames,
+# so the Secret-scope check reads the sibling resources list.
 awk '
-/^---$/ { kind = ""; endpoint_configmap = 0; in_payload = 0; print; next }
+/^---$/ { kind = ""; endpoint_configmap = 0; in_payload = 0; env_block = 0; role_secret_rule = 0; role_res_block = 0; role_rn_block = 0; print; next }
 /^kind: / { kind = $2; print; next }
 !in_payload && /^  name: / {
     if (kind == "ConfigMap" \
@@ -49,6 +57,38 @@ kind == "Secret" && /^(data|stringData):$/ { in_payload = 1; print; next }
 endpoint_configmap && /^data:$/ { in_payload = 1; print; next }
 /^[^ ]/ { in_payload = 0 }
 {
+    # A masked block-scalar env value: its body lines are deeper-indented
+    # than the value line itself and are dropped; a blank line inside the
+    # block is dropped too. The first line at or shallower than the value
+    # line indent ends the block and is processed normally.
+    if (env_block) {
+        match($0, /^ */)
+        if ($0 ~ /^ *$/ || RLENGTH > env_block_indent) next
+        env_block = 0
+    }
+    # Block-form RBAC lists carry their entries on the following lines, at
+    # the same indent as their key in the Helm rendering; the list ends at
+    # the first line at that indent that is not an entry. The resources
+    # entries set the Secret scope and the resourceNames entries are
+    # Secret names to mask.
+    if (role_res_block) {
+        match($0, /^ */)
+        if (RLENGTH >= role_res_indent && $0 ~ /^ *- /) {
+            role_res_item = $0
+            sub(/^ *- /, "", role_res_item)
+            if (role_res_item == "secrets") role_secret_rule = 1
+        } else {
+            role_res_block = 0
+        }
+    }
+    if (role_rn_block) {
+        match($0, /^ */)
+        if (RLENGTH >= role_rn_indent && $0 ~ /^ *- /) {
+            sub(/- .*/, "- <redacted>")
+        } else {
+            role_rn_block = 0
+        }
+    }
     # Image references carry the registry hostname whenever callers override
     # images through values, and an internal registry hostname is endpoint
     # data. The registry host is the first path segment when it contains a
@@ -76,6 +116,11 @@ endpoint_configmap && /^data:$/ { in_payload = 1; print; next }
             /(password|passwd|passphrase|secret|token|credential|api_key|private_key|access_key|auth|session)/ \
             || tolower(env_name) ~ /(url|host|endpoint|addr)/ \
             || tolower(env_name) == "kafka_brokers")) {
+            if ($0 ~ /value: [|>]/) {
+                match($0, /^ */)
+                env_block_indent = RLENGTH
+                env_block = 1
+            }
             sub(/value: .*/, "value: <redacted>")
         }
     }
@@ -88,6 +133,40 @@ endpoint_configmap && /^data:$/ { in_payload = 1; print; next }
         # (the regex checks are substring-based and quote-agnostic).
         gsub(/"/, "", env_name)
         env_await_value = 1
+    }
+    # RBAC rules that target Secrets name the Secret in resourceNames, and
+    # a caller-set name (netbox.apiTokenSecret) carries the same
+    # internal-identifier risk as the env values, so Secret-scoped rules
+    # are masked; other resourceNames stay readable for RBAC review. Each
+    # rules entry repeats its own resources list, which resets the scope.
+    # Both list forms are covered: the flow list on the key line and the
+    # block list whose entries follow at a deeper indent.
+    if ((kind == "Role" || kind == "ClusterRole") \
+        && $0 ~ /^[[:space:]]+resources:/) {
+        role_secret_rule = 0
+        if ($0 ~ /resources:$/) {
+            match($0, /^ */)
+            role_res_indent = RLENGTH
+            role_res_block = 1
+        } else {
+            role_res = $0
+            sub(/^[[:space:]]*resources: */, "", role_res)
+            gsub(/[\[\]" ]/, "", role_res)
+            role_n = split(role_res, role_arr, ",")
+            for (role_i = 1; role_i <= role_n; role_i++) {
+                if (role_arr[role_i] == "secrets") role_secret_rule = 1
+            }
+        }
+    }
+    if ((kind == "Role" || kind == "ClusterRole") && role_secret_rule \
+        && $0 ~ /^[[:space:]]+resourceNames:/) {
+        if ($0 ~ /resourceNames:$/) {
+            match($0, /^ */)
+            role_rn_indent = RLENGTH
+            role_rn_block = 1
+        } else {
+            sub(/resourceNames: .*/, "resourceNames: [<redacted>]")
+        }
     }
     if (in_payload) {
         # Block-scalar body lines (indent deeper than the entry keys) are
