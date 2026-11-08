@@ -1112,17 +1112,20 @@ done
 # The env entries reference the Secret instead of carrying plain text.
 grep -q 'name: keycloak-extra-env' "${TMP_DIR}/dryrun-env-rendered.yaml" \
   || fail "dry-run-env-redaction: the extra-env Secret is missing"
+index=0
 for entry in KC_SPI_DEMO_URL KC_SPI_DEMO_SESSION KC_SPI_DEMO_CLIENT; do
   grep -A2 "name: \"${entry}\"" "${TMP_DIR}/dryrun-env-rendered.yaml" \
     | grep -q 'secretKeyRef' \
     || fail "dry-run-env-redaction: ${entry} does not reference the extra-env Secret"
-  grep -Fq "\"${entry}\": <redacted>" "${TMP_DIR}/dryrun-env-rendered.yaml" \
+  grep -Fq "extra-env-${index}: <redacted>" "${TMP_DIR}/dryrun-env-rendered.yaml" \
     || fail "dry-run-env-redaction: the ${entry} payload was not masked"
+  index=$((index + 1))
 done
-# The Secret keys are quoted: YAML 1.1 coerces an unquoted boolean-like
-# key such as `on` to true, which would not match the Deployment's
-# secretKeyRef key and break the pod at startup.
-printf 'keycloak:\n  extraEnv:\n    - name: "on"\n      value: bool-name-check\n' \
+# The Secret keys are index-based, never the env name: a boolean-like
+# name such as `on` would not round-trip as an unquoted YAML key, and
+# relaxed container env names (Kubernetes 1.33+) can contain characters
+# a Secret key must not.
+printf 'keycloak:\n  extraEnv:\n    - name: "example/name"\n      value: slash-name-check\n    - name: "on"\n      value: bool-name-check\n' \
   >"${TMP_DIR}/dryrun-env-on.yaml"
 if ! helm template osac-infra "${INFRA_CHART_DIR}" \
     --namespace osac-infra \
@@ -1130,10 +1133,18 @@ if ! helm template osac-infra "${INFRA_CHART_DIR}" \
     -f "${TMP_DIR}/dryrun-env-on.yaml" \
     | "${SCRIPT_DIR}/redact-secret-values.sh" \
     >"${TMP_DIR}/dryrun-env-on-rendered.yaml" 2>>"${netbox_gate_err}"; then
-  fail "dry-run-env-redaction: the boolean-named extra-env render failed"
+  fail "dry-run-env-redaction: the oddly named extra-env render failed"
 fi
-grep -Fq '"on": <redacted>' "${TMP_DIR}/dryrun-env-on-rendered.yaml" \
-  || fail "dry-run-env-redaction: the boolean-named Secret key is not quoted"
+grep -Fq 'name: "example/name"' "${TMP_DIR}/dryrun-env-on-rendered.yaml" \
+  || fail "dry-run-env-redaction: the slash-named env entry is missing"
+grep -Fq 'key: "extra-env-0"' "${TMP_DIR}/dryrun-env-on-rendered.yaml" \
+  || fail "dry-run-env-redaction: the slash-named entry does not use an index key"
+grep -Fq 'name: "on"' "${TMP_DIR}/dryrun-env-on-rendered.yaml" \
+  || fail "dry-run-env-redaction: the boolean-named env entry is missing"
+grep -Fq 'extra-env-0: <redacted>' "${TMP_DIR}/dryrun-env-on-rendered.yaml" \
+  || fail "dry-run-env-redaction: the slash-named entry payload was not masked"
+grep -Fq 'extra-env-1: <redacted>' "${TMP_DIR}/dryrun-env-on-rendered.yaml" \
+  || fail "dry-run-env-redaction: the boolean-named entry payload was not masked"
 grep -A1 'name: KC_SPI_IMPORT_REALM_FILE_STRATEGY' \
   "${TMP_DIR}/dryrun-env-rendered.yaml" \
   | grep -q 'value: OVERWRITE' \

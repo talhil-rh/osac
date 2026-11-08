@@ -278,6 +278,7 @@ class DefaultsTest(RenderFailureCase):
         )
 
     def test_cidr_error_does_not_log_the_value(self):
+        """The canonical-CIDR failure message must not echo the value."""
         # The render error reaches the terminal and the CI logs, so the
         # message keeps the field and the constraint but never the
         # customer's CIDR value.

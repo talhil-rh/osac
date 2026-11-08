@@ -173,11 +173,13 @@ metadata:
     {{- include "osac-infra.labels" . | nindent 4 }}
 type: Opaque
 stringData:
-{{- range .Values.keycloak.extraEnv }}
-  {{- /* The key is quoted so a name like "on" stays a string: YAML 1.1
-would otherwise coerce it to boolean true and the Deployment's
-secretKeyRef (which quotes the key) would reference a missing key. */}}
-  {{ .name | quote }}: {{ .value | quote }}
+{{- range $index, $entry := .Values.keycloak.extraEnv }}
+  {{- /* Secret keys must match [-._a-zA-Z0-9]+, but relaxed container
+  env names (Kubernetes 1.33+) allow characters outside that set, and a
+  YAML 1.1 boolean-like name such as "on" would not round-trip unquoted.
+  The key is therefore derived from the entry's position, never its
+  name; the Deployment's secretKeyRef uses the same key. */}}
+  extra-env-{{ $index }}: {{ $entry.value | quote }}
 {{- end }}
 {{- end }}
 ---
@@ -524,12 +526,12 @@ spec:
         - name: KC_SPI_IMPORT_REALM_FILE_STRATEGY
           value: OVERWRITE
         {{- end }}
-        {{- range .Values.keycloak.extraEnv }}
-        - name: {{ .name | quote }}
+        {{- range $index, $entry := .Values.keycloak.extraEnv }}
+        - name: {{ $entry.name | quote }}
           valueFrom:
             secretKeyRef:
               name: keycloak-extra-env
-              key: {{ .name | quote }}
+              key: {{ printf "extra-env-%d" $index | quote }}
         {{- end }}
         args:
         - start

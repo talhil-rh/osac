@@ -324,6 +324,7 @@ class ValidationTest(unittest.TestCase):
         self.assert_invalid("excludedIpv4Cidrs[1] overlaps the default VirtualNetwork CIDR")
 
     def test_validation_errors_do_not_log_cidr_values(self):
+        """Validation errors must not echo the customer's CIDR values."""
         # The step's log is collected on failure, so validation errors keep
         # the field and the constraint but never the customer's CIDR value.
         cases = [
