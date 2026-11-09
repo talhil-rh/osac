@@ -343,6 +343,12 @@ class InputRedactionTests(unittest.TestCase):
             "        - {name: SESSION_TOKEN,\n"
             f'           value: "{self.token}\n'
             '           flow-tail"}\n'
+            "        - {name: SESSION_TOKEN,\n"
+            f'           value: "{self.token}\n'
+            '           comma, brace} tail"}\n'
+            "        - {name: SESSION_TOKEN,\n"
+            f"           value: '{self.token}\n"
+            "           comma-single, brace} tail'}\n"
             "        - {name: PLAIN_SETTING,\n"
             '           value: "readable\n'
             '           readable-tail"}\n'
@@ -354,9 +360,10 @@ class InputRedactionTests(unittest.TestCase):
             input=manifest, text=True, capture_output=True, check=True,
         )
         self.assert_private(result.stdout + result.stderr)
-        for tail in ("wrapped-tail", "quoted-tail", "flow-tail"):
+        for tail in ("wrapped-tail", "quoted-tail", "flow-tail",
+                     "comma, brace", "comma-single"):
             self.assertNotIn(tail, result.stdout)
-        self.assertEqual(result.stdout.count("value: <redacted>"), 6)
+        self.assertEqual(result.stdout.count("value: <redacted>"), 8)
         self.assertIn("readable", result.stdout)
         self.assertIn("readable-tail", result.stdout)
         self.assertIn("value: readable-plain", result.stdout)

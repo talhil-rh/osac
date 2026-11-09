@@ -301,6 +301,30 @@ function scalar_length(text, plain,    i, c, quote) {
     if (match(text, plain)) return RLENGTH
     return 0
 }
+# Index of the quote that closes a quoted scalar whose opening quote was
+# on an earlier line, or 0 when the scalar continues below. A backslash
+# escapes the next character in a double-quoted scalar, and a doubled
+# single quote stands for one quote character, so neither ends the scalar.
+function closing_quote(text, quote,    i, c) {
+    for (i = 1; i <= length(text); i++) {
+        c = substr(text, i, 1)
+        if (quote == "\"") {
+            if (c == "\\") {
+                i++
+            } else if (c == "\"") {
+                return i
+            }
+        } else {
+            if (c != "\047") continue
+            if (substr(text, i + 1, 1) == "\047") {
+                i++
+            } else {
+                return i
+            }
+        }
+    }
+    return 0
+}
 # Masks internal-shaped hostnames (`.svc`, `.internal` and `.local`
 # suffixes, including `.svc.cluster.local`) wherever they appear on a
 # configuration-file line, keeping the port and the rest of the line.
@@ -552,7 +576,7 @@ function mark_env_secret_values(    i, j, end, ind, key_ind, name, sensitive, te
 }
 function flush_document(    index_line, metadata, name) {
     kind = ""; endpoint_configmap = 0; in_payload = 0; env_block = 0
-    env_flow_cont = 0
+    env_flow_cont = 0; env_flow_quote = ""
     config_block = 0; config_file_block = 0
     file_nested = 0; file_nested_indent = 0
     role_rn_block = 0; dns_block = 0
@@ -601,9 +625,20 @@ function redact_line(line, line_no) {
     # A masked flow-style env value can wrap onto the following lines when
     # its quoted scalar does not close on the value line; the wrapped part
     # is masked up to the delimiter that closes the item, so no fragment of
-    # the value survives.
+    # the value survives. A quoted scalar is masked through its closing
+    # quote instead, because a comma or brace inside the value is data, not
+    # the end of the item.
     if (env_flow_cont) {
-        if (match($0, /[,}]/)) {
+        if (env_flow_quote != "") {
+            quote_end = closing_quote($0, env_flow_quote)
+            if (quote_end) {
+                $0 = "<redacted>" substr($0, quote_end + 1)
+                env_flow_cont = 0
+                env_flow_quote = ""
+            } else {
+                $0 = "<redacted>"
+            }
+        } else if (match($0, /[,}]/)) {
             $0 = "<redacted>" substr($0, RSTART)
             env_flow_cont = 0
         } else {
@@ -808,9 +843,18 @@ function redact_line(line, line_no) {
                 flow_head = substr($0, 1, RSTART + RLENGTH - 1)
                 flow_rest = substr($0, RSTART + RLENGTH)
                 flow_len = scalar_length(flow_rest, "^[^,}]*")
+                flow_quote = substr(flow_rest, 1, 1)
                 $0 = flow_head "<redacted>" substr(flow_rest, flow_len + 1)
-                if (substr(flow_rest, flow_len + 1) !~ /^[[:space:]]*[,}]/)
+                env_flow_quote = ""
+                if (substr(flow_rest, flow_len + 1) !~ /^[[:space:]]*[,}]/) {
                     env_flow_cont = 1
+                    # A quoted scalar that does not close on this line is
+                    # masked through its closing quote on a later line, so
+                    # a comma or brace inside the value does not end it.
+                    if ((flow_quote == "\"" || flow_quote == "\047") \
+                        && closing_quote(substr(flow_rest, 2), flow_quote) == 0)
+                        env_flow_quote = flow_quote
+                }
             }
         } else if ($0 ~ /^[[:space:]]*(- )?value:([[:space:]]|$)/) {
             # A masked block value ends its line; an empty value puts the
