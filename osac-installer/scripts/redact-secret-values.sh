@@ -44,9 +44,12 @@
 # hostnames cannot be told apart from chart-internal ones by shape, and
 # the keycloak route hostname and cluster domain land in the same fields.
 # Block-scalar bodies of masked env values and masked ConfigMap values
-# are dropped with their value line. Resource structure,
-# Secret/ConfigMap names and keys, and every other value stay readable so
-# the dry run remains useful for review.
+# are dropped with their value line; a block-scalar ConfigMap value under
+# any other key is a configuration-file payload, and a credential
+# assignment inside it (`password: x`, `token = x`, `"client_secret": x`)
+# is masked in place so the rest of the file stays readable. Resource
+# structure, Secret/ConfigMap names and keys, and every other value stay
+# readable so the dry run remains useful for review.
 set -euo pipefail
 
 # Helm renders each resource as a top-level document: kind and the data /
@@ -88,6 +91,16 @@ function credential_name(name,    lower) {
     lower = tolower(name)
     return lower ~ /(password|passwd|passphrase|secret|token|credential|api_key|private_key|access_key|auth|session|dsn|conn(ection)?_?str)/ \
         || lower ~ /(^|_)key$/
+}
+# True when a key inside a configuration-file payload is credential-shaped.
+# Tighter than credential_name(): file content is prose-like, so the
+# ambiguous words auth/session must be a delimited component (an `author`
+# or `oauth` line is not a credential), while the unambiguous words match
+# anywhere (client_secret, DB_PASSWORD).
+function credential_file_key(name,    lower) {
+    lower = tolower(name)
+    return lower ~ /(password|passwd|passphrase|secret|token|credential|api[_.-]?key|private[_.-]?key|access[_.-]?key|dsn)/ \
+        || lower ~ /(^|[_.-])(auth|session)([_.-]|$)/
 }
 # Indent of the key text on a line, counting a list-item dash as
 # structure so `- resources:` and `  resources:` compare as siblings.
@@ -164,7 +177,8 @@ function mark_role_secret_names(    i, j, rule_end, rule_indent, key_ind, res_se
 }
 function flush_document(    index_line, metadata, name) {
     kind = ""; endpoint_configmap = 0; in_payload = 0; env_block = 0
-    config_block = 0; env_await_value = 0; role_rn_block = 0; dns_block = 0
+    config_block = 0; config_file_block = 0; env_await_value = 0
+    role_rn_block = 0; dns_block = 0
     configmap_document = 0; configmap_data = 0
     for (index_line = 1; index_line <= document_length; index_line++) {
         $0 = document[index_line]
@@ -214,6 +228,36 @@ function redact_line(line, line_no) {
         match($0, /^ */)
         if ($0 ~ /^ *$/ || RLENGTH > config_block_indent) return
         config_block = 0
+    }
+    # A ConfigMap data value may be a whole configuration file: any
+    # block-scalar key, not only a credential-shaped one, can carry a
+    # password or token on one of its lines. The body is file content, not
+    # manifest structure, so a credential assignment is masked in place and
+    # every other line stays readable for review; the block ends at the
+    # first line at or shallower than the key, which resumes normal
+    # processing.
+    if (config_file_block) {
+        match($0, /^ */)
+        if ($0 !~ /^ *$/ && RLENGTH <= config_file_indent) {
+            config_file_block = 0
+        } else {
+            file_line = $0
+            if (file_line ~ /^[[:space:]]*["\047]?[A-Za-z0-9_.-]+["\047]?[[:space:]]*[:=][[:space:]]*[^[:space:]]/) {
+                file_key = file_line
+                sub(/^[[:space:]]*["\047]?/, "", file_key)
+                sub(/["\047]?[[:space:]]*[:=][[:space:]]*.*$/, "", file_key)
+                if (credential_file_key(file_key)) {
+                    # Keep everything through the separator and any spacing
+                    # after it, so `password: x`, `password=x` and
+                    # `"token": "x"` all keep their shape.
+                    if (match(file_line, /[:=][[:space:]]*/)) {
+                        file_line = substr(file_line, 1, RSTART + RLENGTH - 1) "<redacted>"
+                    }
+                }
+            }
+            print file_line
+            return
+        }
     }
     # Block-form resourceNames lists carry their entries on the following
     # lines, at the same indent as their key in the Helm rendering; the
@@ -383,6 +427,14 @@ function redact_line(line, line_no) {
             }
             sub(/: .*/, ": <redacted>")
         }
+    }
+    # Any other ConfigMap data block scalar is a configuration-file payload;
+    # its body is scanned line by line by the file rule above until the
+    # block ends.
+    if (configmap_data && !config_block && $0 ~ /^  [^ :][^:]*: [|>]/) {
+        match($0, /^ */)
+        config_file_indent = RLENGTH
+        config_file_block = 1
     }
     if (in_payload) {
         # Block-scalar body lines (indent deeper than the entry keys) are

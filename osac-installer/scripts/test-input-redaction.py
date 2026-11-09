@@ -92,6 +92,40 @@ class InputRedactionTests(unittest.TestCase):
         self.assertEqual(result.stdout.count("plainValue: readable"), 2)
         self.assertNotIn("apiToken: |", result.stdout)
 
+    def test_configmap_file_payload_credentials_are_masked(self):
+        """Check credential lines inside ConfigMap file payloads are masked."""
+        manifest = (
+            "kind: ConfigMap\nmetadata:\n  name: netbox-file-config\n"
+            "data:\n  netbox.conf: |\n"
+            "    [database]\n"
+            "    host = netbox-db\n"
+            f"    password = {self.password}\n"
+            f"    token = {self.token}\n"
+            "    author = readable\n"
+            "    ttl = 300\n"
+            "  settings.yaml: |\n"
+            f'    "client_secret": "{self.token}"\n'
+            "    oauth: oidc\n"
+            "---\n"
+            "data:\n"
+            "  app.conf: |\n"
+            f"    db_password={self.password}\n"
+            "    log_level=debug\n"
+            "kind: ConfigMap\nmetadata:\n  name: data-first\n"
+        )
+        result = subprocess.run(
+            [str(INSTALLER / "scripts/redact-secret-values.sh")],
+            input=manifest, text=True, capture_output=True, check=True,
+        )
+        self.assert_private(result.stdout + result.stderr)
+        self.assertIn("password = <redacted>", result.stdout)
+        self.assertIn("token = <redacted>", result.stdout)
+        self.assertIn('"client_secret": <redacted>', result.stdout)
+        self.assertIn("db_password=<redacted>", result.stdout)
+        for readable in ("host = netbox-db", "author = readable", "ttl = 300",
+                         "oauth: oidc", "log_level=debug"):
+            self.assertIn(readable, result.stdout)
+
     def test_netbox_extra_deploy_real_render(self):
         """Check a real render whose extraDeploy payload precedes its identity."""
         for data_first in (False, True):

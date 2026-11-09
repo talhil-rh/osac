@@ -1310,6 +1310,55 @@ grep -q 'apiToken: <redacted>' "${TMP_DIR}/dryrun-configmap-rendered.yaml" \
 grep -q 'plainValue: readable' "${TMP_DIR}/dryrun-configmap-rendered.yaml" \
   || fail "dry-run-configmap-credential-redaction: the non-credential entry was masked"
 
+# A ConfigMap data value can also be a whole configuration file: a
+# block-scalar key like netbox.conf says nothing about credentials, but
+# its body may carry a password assignment. The dry run prints that body,
+# so the redactor masks credential assignments in place and leaves the
+# rest of the file readable. This path goes through make and
+# INFRA_VALUES_EXTRA, the way an operator supplies an overlay. It runs
+# against this checkout, not the sandbox: earlier stubbed dry runs cleared
+# the sandbox's built chart dependencies, and every dependency recipe is
+# skipped here with -o so this run writes nothing.
+echo "checking dry-run-configmap-file-redaction (file payloads from INFRA_VALUES_EXTRA stay out)"
+cm_file_password="configmap-file-password-$(date +%s)-$$"
+cm_file_token="configmap-file-token-$(date +%s)-$$"
+cat >"${TMP_DIR}/dryrun-configmap-file.yaml" <<CM_FILE_EOF
+netbox:
+  extraDeploy:
+    - apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: netbox-file-config
+      data:
+        netbox.conf: |
+          [database]
+          host = netbox-db
+          password = ${cm_file_password}
+          token = ${cm_file_token}
+          author = readable
+CM_FILE_EOF
+if ! make -C "${INSTALLER_DIR}" --no-print-directory \
+    -o helm-deps -o helm-infra-deps -o helm-osac-deps \
+    -o validate-osac-chart-oci-ref install-dry-run \
+    PLATFORM=openshift PROFILE=bmaas-netbox-ci NS=osac \
+    DRY_RUN_OCP_VERSION=4.22 DRY_RUN_CLUSTER_DOMAIN=apps.example.com \
+    "INFRA_VALUES_EXTRA=-f values/bmaas-netbox-ci/infra.yaml -f ${TMP_DIR}/dryrun-configmap-file.yaml" \
+    EXTRA_HELM_ARGS=--set=bmf.netbox.tokenValue=offline-placeholder \
+    >"${TMP_DIR}/dryrun-configmap-file.out" \
+    2>"${TMP_DIR}/dryrun-configmap-file.err"; then
+  fail "dry-run-configmap-file-redaction: the dry run failed"
+fi
+grep -Fq "${cm_file_password}" "${TMP_DIR}/dryrun-configmap-file.out" \
+  && fail "dry-run-configmap-file-redaction: a file payload password survived"
+grep -Fq "${cm_file_token}" "${TMP_DIR}/dryrun-configmap-file.out" \
+  && fail "dry-run-configmap-file-redaction: a file payload token survived"
+grep -q 'name: netbox-file-config' "${TMP_DIR}/dryrun-configmap-file.out" \
+  || fail "dry-run-configmap-file-redaction: the overlay ConfigMap is missing"
+grep -q 'password = <redacted>' "${TMP_DIR}/dryrun-configmap-file.out" \
+  || fail "dry-run-configmap-file-redaction: the file password was not masked"
+grep -q 'author = readable' "${TMP_DIR}/dryrun-configmap-file.out" \
+  || fail "dry-run-configmap-file-redaction: a non-credential line was masked"
+
 # Container env entries are a plain-text channel for credentials: callers
 # can inject passwords into workload specs through values overlays (for
 # example keycloak.extraEnv) instead of Secret references. The chart
