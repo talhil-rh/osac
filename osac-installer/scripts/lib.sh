@@ -215,7 +215,13 @@ offline_render_error() {
                     } else if (match($0, "^- [A-Za-z0-9_.()-]+: ")) {
                         print substr($0, RSTART + 2, RLENGTH - 4) \
                             ": violates the values schema"
-                    } else {
+                    } else if ($0 !~ /^- /) {
+                        # Only the chart-name line precedes the first item;
+                        # any other non-item line means the schema block
+                        # ended. A `- ` line that no branch recognizes is
+                        # still an item (a Helm 3 path can hold characters
+                        # outside the pattern), so scanning stays stopped:
+                        # a line after it could be echoed rejected input.
                         done = 0
                     }
                 }' >&2 ;;

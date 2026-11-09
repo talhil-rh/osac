@@ -120,6 +120,11 @@ class InputRedactionTests(unittest.TestCase):
             "      readable-cert-line\n"
             f"    Authorization: Bearer {self.token}\n"
             f"    uri = postgres://user:{self.password}@db/app\n"
+            f"    api = https://netbox.example/api/?token={self.token}"
+            "&author=readable\n"
+            f"    endpoint = https://netbox.example/api"
+            f"?api_key={self.password}\n"
+            "    paged = https://netbox.example/api?page=2&limit=10\n"
             f'    {{"password":"{self.token}"}}\n'
             "    key: readable-key\n"
             "    tls.key: /etc/tls/tls.key\n"
@@ -154,10 +159,14 @@ class InputRedactionTests(unittest.TestCase):
         self.assertIn("readable-cert-line", result.stdout)
         self.assertIn("Authorization: <redacted>", result.stdout)
         self.assertIn("postgres://<redacted>@db/app", result.stdout)
+        self.assertIn("?token=<redacted>&author=readable", result.stdout)
+        self.assertIn("?api_key=<redacted>", result.stdout)
         self.assertIn('{"password":"<redacted>"}', result.stdout)
         for readable in ("host = netbox-db", "author = readable", "ttl = 300",
                          "oauth: oidc", "log_level=debug",
-                         "key: readable-key", "tls.key: /etc/tls/tls.key"):
+                         "key: readable-key", "tls.key: /etc/tls/tls.key",
+                         "paged = https://netbox.example/api"
+                         "?page=2&limit=10"):
             self.assertIn(readable, result.stdout)
 
     def test_single_line_configmap_file_credentials_are_masked(self):
@@ -531,6 +540,25 @@ class InputRedactionTests(unittest.TestCase):
                 if not schema_reported:
                     self.assertNotIn(
                         "violates the values schema", result.stderr)
+
+    def test_offline_render_error_stops_after_unmatched_schema_item(self):
+        """Check an unrecognized first schema item ends the scan."""
+        message = (
+            "Error: values don't meet the specifications of the schema(s)"
+            " in the following chart(s):\n"
+            "osac:\n"
+            "- password field: Invalid type. Expected: integer,"
+            " given: string\n"
+            f"- at '/{self.hostname}/echoed': got string, want integer\n"
+        )
+        result = subprocess.run(
+            ["bash", "-c", 'source "$1"; offline_render_error "$2"',
+             "bash", str(INSTALLER / "scripts/lib.sh"), message],
+            text=True, capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assert_private(result.stdout + result.stderr)
+        self.assertNotIn("violates the values schema", result.stderr)
 
     def test_make_gate_infra_error_is_private(self):
         """Check a failing infra render stays private through the make gate."""

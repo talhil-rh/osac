@@ -195,6 +195,27 @@ function has_inline_credential(text,    rest, found, key) {
     }
     return 0
 }
+# Credential-bearing URL query parameters (`?token=x`, `&api_key=y`) are
+# masked in place, keeping the parameter name and the rest of the line
+# readable. A URL can sit in a neutral setting such as
+# `endpoint = https://host/api`, so the query key decides, not the line
+# key. The value is masked through the next separator or whitespace,
+# which also takes any surrounding quotes with it.
+function mask_query_credentials(text,    out, rest, found, key) {
+    out = ""
+    rest = text
+    while (match(rest, /[?&]["\047]?[A-Za-z0-9_.-]+["\047]?=/)) {
+        found = substr(rest, RSTART, RLENGTH)
+        key = found
+        sub(/^[?&]/, "", key)
+        sub(/["\047]?=$/, "", key)
+        out = out substr(rest, 1, RSTART + RLENGTH - 1)
+        rest = substr(rest, RSTART + RLENGTH)
+        if (credential_file_key(key) && match(rest, /^[^&[:space:]]*/))
+            rest = "<redacted>" substr(rest, RLENGTH + 1)
+    }
+    return out rest
+}
 # Indent of the key text on a line, counting a list-item dash as
 # structure so `- resources:` and `  resources:` compare as siblings.
 function key_indent(line,    indent) {
@@ -462,6 +483,11 @@ function redact_line(line, line_no) {
             # the key is, because a neutral key such as uri can still
             # carry a password in a connection string.
             gsub(/:\/\/[^\/[:space:]@]+@/, "://<redacted>@", file_body)
+            # A credential can also ride in a URL query parameter on a
+            # file line whose own key is neutral
+            # (`api = https://host/api?token=x`), which the rules above
+            # do not see.
+            file_body = mask_query_credentials(file_body)
             # An inline JSON object line has no leading key for the rule
             # above; its credential-shaped fields are masked in place.
             file_body = mask_json_credentials(file_body)
