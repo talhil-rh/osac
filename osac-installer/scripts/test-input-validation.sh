@@ -1345,6 +1345,7 @@ cm_file_auth="configmap-file-auth-$(date +%s)-$$"
 cm_file_uri="configmap-file-uri-$(date +%s)-$$"
 cm_file_json="configmap-file-json-$(date +%s)-$$"
 cm_file_json_escaped="configmap-file-json-escaped-$(date +%s)-$$"
+cm_file_json_backslash="configmap-file-json-backslash-$(date +%s)-$$"
 cm_file_nested="configmap-file-nested-$(date +%s)-$$"
 cat >"${TMP_DIR}/dryrun-configmap-file.yaml" <<CM_FILE_EOF
 netbox:
@@ -1367,6 +1368,7 @@ netbox:
           uri = postgres://user:${cm_file_uri}@db/app
           {"password":"${cm_file_json}"}
           {"token":"pre\"${cm_file_json_escaped}\\\\tail"}
+          {"pattern":"C:\\\\","password":"${cm_file_json_backslash}"}
           private_key: |
             key-material-line
             ${cm_file_nested}
@@ -1399,6 +1401,8 @@ grep -Fq "${cm_file_json}" "${TMP_DIR}/dryrun-configmap-file.out" \
   && fail "dry-run-configmap-file-redaction: an inline JSON value survived"
 grep -Fq "${cm_file_json_escaped}" "${TMP_DIR}/dryrun-configmap-file.out" \
   && fail "dry-run-configmap-file-redaction: an escaped JSON value survived"
+grep -Fq "${cm_file_json_backslash}" "${TMP_DIR}/dryrun-configmap-file.out" \
+  && fail "dry-run-configmap-file-redaction: a password after an escaped backslash survived"
 grep -Fq "${cm_file_nested}" "${TMP_DIR}/dryrun-configmap-file.out" \
   && fail "dry-run-configmap-file-redaction: a nested block scalar survived"
 grep -Fq 'key-material-line' "${TMP_DIR}/dryrun-configmap-file.out" \
@@ -1417,6 +1421,8 @@ grep -q '{"password":"<redacted>"}' "${TMP_DIR}/dryrun-configmap-file.out" \
   || fail "dry-run-configmap-file-redaction: an inline JSON field was not masked"
 grep -q '{"token":"<redacted>"}' "${TMP_DIR}/dryrun-configmap-file.out" \
   || fail "dry-run-configmap-file-redaction: an escaped JSON field was not masked"
+grep -Fq '{"pattern":"C:\\","password":"<redacted>"}' "${TMP_DIR}/dryrun-configmap-file.out" \
+  || fail "dry-run-configmap-file-redaction: an escaped-backslash prefix broke the JSON mask"
 grep -q 'private_key: <redacted>' "${TMP_DIR}/dryrun-configmap-file.out" \
   || fail "dry-run-configmap-file-redaction: a nested block key was not masked"
 grep -q 'readable-cert-line' "${TMP_DIR}/dryrun-configmap-file.out" \

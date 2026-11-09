@@ -156,8 +156,10 @@ function mask_json_credentials(line,    out, rest, obj, key, val) {
     # JSON string values may contain escaped quotes and backslashes, so the
     # value pattern consumes an escape pair before it can end the string;
     # otherwise a `\"` inside a credential would cut the match short and
-    # print the rest of the value.
-    while (match(rest, /"[A-Za-z0-9_.-]+"[[:space:]]*:[[:space:]]*"(\\.|[^"])*"/)) {
+    # print the rest of the value. A backslash is never an ordinary
+    # character, so a trailing `\\` cannot pair with the closing quote and
+    # swallow the opening quote of the next field.
+    while (match(rest, /"[A-Za-z0-9_.-]+"[[:space:]]*:[[:space:]]*"([^"\\]|\\.)*"/)) {
         obj = substr(rest, RSTART, RLENGTH)
         key = obj
         sub(/^"/, "", key)
@@ -515,8 +517,10 @@ function redact_line(line, line_no) {
             }
         } else if ($0 ~ /^[[:space:]]*(- )?value: /) {
             if ($0 ~ /^[[:space:]]*(- )?value: [|>]/) {
-                match($0, /^ */)
-                env_block_indent = RLENGTH
+                # The key indent counts the item dash as structure, so a
+                # `- value: |` line does not swallow a sibling `name:` at
+                # the key indent as if it were part of the block body.
+                env_block_indent = key_indent($0)
                 env_block = 1
             }
             sub(/value: .*/, "value: <redacted>")

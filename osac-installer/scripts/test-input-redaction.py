@@ -237,16 +237,21 @@ class InputRedactionTests(unittest.TestCase):
             f"        - {{subvalue: plain, name: API_TOKEN, value: {self.token}}}\n"
             "        - {name: PLAIN_SETTING, value: readable-flow}\n"
             f"        - name: BIND_PASSWORD\n          value: {self.token}\n"
+            "        - value: |\n"
+            "            block-body-must-not-print\n"
+            "          name: DB_PASSWORD\n"
         )
         result = subprocess.run(
             [str(INSTALLER / "scripts/redact-secret-values.sh")],
             input=manifest, text=True, capture_output=True, check=True,
         )
         self.assert_private(result.stdout + result.stderr)
-        self.assertEqual(result.stdout.count("value: <redacted>"), 6)
+        self.assertEqual(result.stdout.count("value: <redacted>"), 7)
         self.assertIn(
             "{name: PLAIN_SETTING, value: readable-flow}", result.stdout
         )
+        self.assertIn("name: DB_PASSWORD", result.stdout)
+        self.assertNotIn("block-body-must-not-print", result.stdout)
 
     def test_netbox_extra_deploy_real_render(self):
         """Check a real render whose extraDeploy payload precedes its identity."""
