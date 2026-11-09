@@ -169,34 +169,52 @@ offline_render_error() {
         *"NETRIS_CONTROLLER_URL must be an https:// URL"*)
             echo "instanceGroups.networkFulfillment.config.NETRIS_CONTROLLER_URL must be an https:// URL" >&2 ;;
         *)
-            # Any other failure keeps the generic line above; extract only
-            # the schema field path so the user can find the offending
-            # input. Helm 3 prints "- a.b.c: <message>"; Helm 4 prints
-            # "- at '/a/b/c': <message>" and its message may embed the
-            # value, so both matchers drop everything after the path and
-            # the charset excludes value-shaped characters. A template
-            # fail/required error prints "execution error at
-            # (CHART/templates/FILE:L:C): <message>", where the message
-            # can embed the value; only the chart-relative location is
-            # printed, and it is a static chart path, not customer data.
-            # The location is read from the first "Error: " line only: a
-            # tpl fail/required message can hold a newline followed by a
-            # fake "Error: execution error at (value:1:1):" line, and
-            # scanning every line would print that text as a location.
-            # Helm prints chart warnings before the error, so the scan
-            # starts at the first error line instead of the first line of
-            # output. A first error that is not a template failure prints
-            # no location and keeps the generic line alone.
-            # The fabricDomainInventory entry key is customer-supplied (a
-            # hostname) and can itself appear in the path, so that path is
-            # printed without the entry key.
-            printf '%s\n' "$1" | LC_ALL=C sed -nE \
-                -e "s|^- at '/operator/fabricDomainInventory/[^']*'.*|operator.fabricDomainInventory: violates the values schema|p" \
-                -e 's/^- operator\.fabricDomainInventory\.[^:]*: .*/operator.fabricDomainInventory: violates the values schema/p' \
-                -e "s|^- at '([A-Za-z0-9_/.~-]*)'.*|\1: violates the values schema|p" \
-                -e 's/^- ([A-Za-z0-9_.()-]+): .*/\1: violates the values schema/p' >&2
-            printf '%s\n' "$1" | LC_ALL=C sed -nE '/^Error: /{p;q;}' | LC_ALL=C sed -nE \
-                -e 's|^Error: execution error at \(([A-Za-z0-9_./-]+:[0-9]+:[0-9]+)\):.*|template check failed in \1 (message suppressed)|p' >&2 ;;
+            # Any other failure keeps the generic line above. Only the
+            # diagnostics Helm itself writes are echoed back: the
+            # chart-relative template location, or the first values
+            # schema field path. Both are read from the first "Error: "
+            # line, because a fail/required message or a rejected value
+            # can hold a newline followed by text shaped like a second
+            # error or schema item. Helm prints chart warnings before the
+            # error, so the scan starts at the first error line rather
+            # than the first line of output. Nothing is read past the
+            # first schema item: later items cannot be told apart from
+            # such echoed text. A failure without a recognizable marker
+            # keeps the generic line alone. The fabricDomainInventory
+            # entry key is customer-supplied (a hostname) and can appear
+            # in the path, so that path is printed without the entry key.
+            printf '%s\n' "$1" | LC_ALL=C awk -v q="'" '
+                !seen && /^Error: / {
+                    seen = 1
+                    if ($0 ~ /^Error: execution error at \(/) {
+                        loc = $0
+                        sub(/^Error: execution error at \(/, "", loc)
+                        sub(/\):.*/, "", loc)
+                        if (loc ~ /^[A-Za-z0-9_.\/-]+:[0-9]+:[0-9]+$/)
+                            print "template check failed in " loc \
+                                " (message suppressed)"
+                    } else if ($0 ~ /^Error: values don/) {
+                        schema = 1
+                    }
+                    next
+                }
+                schema && !done {
+                    done = 1
+                    if ($0 ~ ("^- at " q "/operator/fabricDomainInventory/") ||
+                        $0 ~ /^- operator\.fabricDomainInventory\./) {
+                        print "operator.fabricDomainInventory:" \
+                            " violates the values schema"
+                    } else if (match($0, "^- at " q "[^" q "]*" q ":")) {
+                        path = substr($0, RSTART + 6, RLENGTH - 8)
+                        if (path ~ /^[A-Za-z0-9_.~\/-]+$/)
+                            print path ": violates the values schema"
+                    } else if (match($0, "^- [A-Za-z0-9_.()-]+: ")) {
+                        print substr($0, RSTART + 2, RLENGTH - 4) \
+                            ": violates the values schema"
+                    } else {
+                        done = 0
+                    }
+                }' >&2 ;;
     esac
 }
 

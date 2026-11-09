@@ -473,6 +473,40 @@ class InputRedactionTests(unittest.TestCase):
         self.assert_private(result.stdout + result.stderr)
         self.assertNotIn("template check failed in", result.stderr)
 
+    def test_offline_render_error_ignores_echoed_schema_paths(self):
+        """Check path-shaped message text is never reported as a path."""
+        cases = (
+            (
+                "Error: execution error at (osac/templates/x.yaml:1:3):"
+                " rejected\n"
+                f"- at '/{self.hostname}/path': value\n",
+                "template check failed in osac/templates/x.yaml:1:3"
+                " (message suppressed)",
+                False,
+            ),
+            (
+                "Error: values don't meet the specifications of the"
+                " schema(s) in the following chart(s):\nosac:\n"
+                "- at '/global/real': rejected\n"
+                f"- at '/{self.hostname}/path': value\n",
+                "/global/real: violates the values schema",
+                True,
+            ),
+        )
+        for message, expected, schema_reported in cases:
+            with self.subTest(expected=expected):
+                result = subprocess.run(
+                    ["bash", "-c", 'source "$1"; offline_render_error "$2"',
+                     "bash", str(INSTALLER / "scripts/lib.sh"), message],
+                    text=True, capture_output=True,
+                )
+                self.assertEqual(result.returncode, 0)
+                self.assert_private(result.stdout + result.stderr)
+                self.assertIn(expected, result.stderr)
+                if not schema_reported:
+                    self.assertNotIn(
+                        "violates the values schema", result.stderr)
+
     def test_make_gate_infra_error_is_private(self):
         """Check a failing infra render stays private through the make gate."""
         binary = self.directory / "bin"
