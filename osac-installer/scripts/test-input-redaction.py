@@ -121,6 +121,10 @@ class InputRedactionTests(unittest.TestCase):
             "    certificate: |\n"
             "      readable-cert-line\n"
             f"    Authorization: Bearer {self.token}\n"
+            f"    options = Authorization: Bearer {self.token}\n"
+            f'    forwarded = -H "Authorization: Bearer {self.token}"\n'
+            f"    prefixed = X-Authorization: Bearer {self.token}\n"
+            f"    auth = Basic {self.token}\n"
             f"    uri = postgres://user:{self.password}@db/app\n"
             f"    conn = postgres://user:{self.password}"
             f"@{self.corp_host}:5432/app\n"
@@ -170,6 +174,10 @@ class InputRedactionTests(unittest.TestCase):
         self.assertNotIn("key-material-line", result.stdout)
         self.assertIn("readable-cert-line", result.stdout)
         self.assertIn("Authorization: <redacted>", result.stdout)
+        self.assertIn("options = Authorization: <redacted>", result.stdout)
+        self.assertIn('-H "Authorization: <redacted>"', result.stdout)
+        self.assertIn("prefixed = X-Authorization: <redacted>", result.stdout)
+        self.assertIn("auth = <redacted>", result.stdout)
         self.assertIn("postgres://<redacted>@<redacted>/app", result.stdout)
         self.assertIn("conn = postgres://<redacted>@<redacted>/app",
                       result.stdout)
@@ -352,6 +360,39 @@ class InputRedactionTests(unittest.TestCase):
         self.assertIn("readable", result.stdout)
         self.assertIn("readable-tail", result.stdout)
         self.assertIn("value: readable-plain", result.stdout)
+
+    def test_flow_env_item_beyond_join_limit_is_masked(self):
+        """Check a flow env item longer than the old join limit is masked."""
+        pad = "".join(f"           pad{i:03d}: x,\n" for i in range(120))
+        cases = {
+            "forward": (
+                "kind: Deployment\nmetadata:\n  name: web\n"
+                "spec:\n  containers:\n    - name: app\n      env:\n"
+                "        - {name: API_TOKEN,\n" + pad +
+                f"           value: {self.token}}}\n"
+            ),
+            "reverse": (
+                "kind: Deployment\nmetadata:\n  name: web\n"
+                "spec:\n  containers:\n    - name: app\n      env:\n"
+                f"        - {{value: {self.token},\n" + pad +
+                "           name: API_TOKEN}\n"
+            ),
+            "unclosed": (
+                "kind: Deployment\nmetadata:\n  name: web\n"
+                "spec:\n  containers:\n    - name: app\n      env:\n"
+                "        - {name: API_TOKEN,\n"
+                f"           value: {self.token}\n"
+            ),
+        }
+        for label, manifest in cases.items():
+            with self.subTest(case=label):
+                result = subprocess.run(
+                    [str(INSTALLER / "scripts/redact-secret-values.sh")],
+                    input=manifest, text=True, capture_output=True,
+                    check=True,
+                )
+                self.assert_private(result.stdout + result.stderr)
+                self.assertNotIn(self.token, result.stdout)
 
     def test_offline_render_error_hides_set_file_path(self):
         """Check a --set-file failure does not echo the file path."""

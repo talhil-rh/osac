@@ -1342,6 +1342,9 @@ cm_file_password="configmap-file-password-$(date +%s)-$$"
 cm_file_token="configmap-file-token-$(date +%s)-$$"
 cm_file_key="configmap-file-key-$(date +%s)-$$"
 cm_file_auth="configmap-file-auth-$(date +%s)-$$"
+cm_file_auth_embedded="configmap-file-auth-embedded-$(date +%s)-$$"
+cm_file_auth_quoted="configmap-file-auth-quoted-$(date +%s)-$$"
+cm_file_auth_prefixed="configmap-file-auth-prefixed-$(date +%s)-$$"
 cm_file_uri="configmap-file-uri-$(date +%s)-$$"
 cm_file_query="configmap-file-query-$(date +%s)-$$"
 cm_file_embedded="configmap-file-embedded-$(date +%s)-$$"
@@ -1370,6 +1373,9 @@ netbox:
           encryption_key: ${cm_file_key}
           export SIGNING_KEY=${cm_file_key}
           Authorization: Bearer ${cm_file_auth}
+          options = Authorization: Bearer ${cm_file_auth_embedded}
+          forwarded = -H "Authorization: Bearer ${cm_file_auth_quoted}"
+          prefixed = X-Authorization: Bearer ${cm_file_auth_prefixed}
           uri = postgres://user:${cm_file_uri}@db/app
           conn = postgres://user:${cm_file_embedded}@${cm_file_host}.apps.example.com/app
           quoted = "https://${cm_file_host}.apps.example.com"
@@ -1411,6 +1417,12 @@ grep -Fq "${cm_file_key}" "${TMP_DIR}/dryrun-configmap-file.out" \
   && fail "dry-run-configmap-file-redaction: a KEY-suffixed value survived"
 grep -Fq "${cm_file_auth}" "${TMP_DIR}/dryrun-configmap-file.out" \
   && fail "dry-run-configmap-file-redaction: an Authorization value survived"
+grep -Fq "${cm_file_auth_embedded}" "${TMP_DIR}/dryrun-configmap-file.out" \
+  && fail "dry-run-configmap-file-redaction: an embedded Authorization value survived"
+grep -Fq "${cm_file_auth_quoted}" "${TMP_DIR}/dryrun-configmap-file.out" \
+  && fail "dry-run-configmap-file-redaction: a quoted embedded Authorization value survived"
+grep -Fq "${cm_file_auth_prefixed}" "${TMP_DIR}/dryrun-configmap-file.out" \
+  && fail "dry-run-configmap-file-redaction: a prefixed Authorization value survived"
 grep -Fq "${cm_file_uri}" "${TMP_DIR}/dryrun-configmap-file.out" \
   && fail "dry-run-configmap-file-redaction: URL userinfo survived"
 grep -Fq "${cm_file_query}" "${TMP_DIR}/dryrun-configmap-file.out" \
@@ -1437,6 +1449,12 @@ grep -q 'export DB_PASSWORD=<redacted>' "${TMP_DIR}/dryrun-configmap-file.out" \
   || fail "dry-run-configmap-file-redaction: a prefixed assignment was not masked"
 grep -q 'Authorization: <redacted>' "${TMP_DIR}/dryrun-configmap-file.out" \
   || fail "dry-run-configmap-file-redaction: an Authorization header was not masked"
+grep -Fq 'options = Authorization: <redacted>' "${TMP_DIR}/dryrun-configmap-file.out" \
+  || fail "dry-run-configmap-file-redaction: an embedded Authorization header was not masked"
+grep -Fq 'forwarded = -H "Authorization: <redacted>"' "${TMP_DIR}/dryrun-configmap-file.out" \
+  || fail "dry-run-configmap-file-redaction: a quoted embedded Authorization header was not masked"
+grep -Fq 'prefixed = X-Authorization: <redacted>' "${TMP_DIR}/dryrun-configmap-file.out" \
+  || fail "dry-run-configmap-file-redaction: a prefixed Authorization header was not masked"
 grep -q 'postgres://<redacted>@<redacted>/app' "${TMP_DIR}/dryrun-configmap-file.out" \
   || fail "dry-run-configmap-file-redaction: URL userinfo was not masked"
 grep -Fq 'conn = postgres://<redacted>@<redacted>/app' "${TMP_DIR}/dryrun-configmap-file.out" \

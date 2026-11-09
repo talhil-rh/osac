@@ -187,6 +187,15 @@ function credential_file_key(name,    lower) {
         || lower ~ /[_-]key$/ \
         || name ~ /[a-z0-9]Key$/
 }
+# True when a key inside a configuration-file payload carries a header
+# credential. Its value is an authentication scheme followed by the
+# credential (`Authorization: Bearer x`, `auth: Basic x`), so the whole
+# value is masked; masking only the first word would print the token.
+function header_credential_key(name,    lower) {
+    lower = tolower(name)
+    return lower ~ /authorization/ \
+        || lower ~ /(^|[_.-])auth([_.-]|$)/
+}
 # Masks credential values in an inline JSON object on one line, keeping
 # the key and the rest of the line readable. Only quoted string values
 # are considered, and a line without such fields passes through.
@@ -249,8 +258,15 @@ function mask_query_credentials(text,    out, rest, found, key) {
         sub(/["\047]?=$/, "", key)
         out = out substr(rest, 1, RSTART + RLENGTH - 1)
         rest = substr(rest, RSTART + RLENGTH)
-        if (credential_file_key(key) && match(rest, /^[^&[:space:]]*/))
+        if (credential_file_key(key) && match(rest, /^[^&[:space:]]*/)) {
+            if (header_credential_key(key)) {
+                # A header credential carries a scheme and the token, so
+                # the value runs through the next parameter, not only to
+                # the next space.
+                match(rest, /^[^&]*/)
+            }
             rest = "<redacted>" substr(rest, RLENGTH + 1)
+        }
     }
     return out rest
 }
@@ -342,14 +358,29 @@ function mask_embedded_credentials(text,    out, rest, found, key, n, quote) {
         out = out substr(rest, 1, RSTART + RLENGTH - 1)
         rest = substr(rest, RSTART + RLENGTH)
         if (credential_file_key(key)) {
-            n = scalar_length(rest, "^[^[:space:];,&}]*")
-            quote = substr(rest, 1, 1)
-            if (quote == "\"" || quote == "\047") {
-                # Keep the quotes so an inline JSON object keeps its shape;
-                # only the content between them is masked.
-                rest = quote "<redacted>" quote substr(rest, n + 1)
+            if (header_credential_key(key)) {
+                # A header credential is a scheme and the token after it
+                # (`Bearer x`), so the whole value is masked through its
+                # closing quote, the next field separator, or the end of
+                # the line. Masking only the first word would print the
+                # token, as the scheme is always followed by one.
+                quote = substr(rest, 1, 1)
+                if (quote == "\"" || quote == "\047") {
+                    n = scalar_length(rest, "")
+                    rest = quote "<redacted>" quote substr(rest, n + 1)
+                } else if (match(rest, /^([^"\047;&},]|\\.)*/)) {
+                    rest = "<redacted>" substr(rest, RLENGTH + 1)
+                }
             } else {
-                rest = "<redacted>" substr(rest, n + 1)
+                n = scalar_length(rest, "^[^[:space:];,&}]*")
+                quote = substr(rest, 1, 1)
+                if (quote == "\"" || quote == "\047") {
+                    # Keep the quotes so an inline JSON object keeps its
+                    # shape; only the content between them is masked.
+                    rest = quote "<redacted>" quote substr(rest, n + 1)
+                } else {
+                    rest = "<redacted>" substr(rest, n + 1)
+                }
             }
         }
     }
@@ -435,8 +466,10 @@ function mark_role_secret_names(    i, j, rule_end, rule_indent, key_ind, res_se
 # before its name. Flow-style items (`- {name: X, value: Y}`) are marked
 # whole and masked in place, because name and value share the item line;
 # an item can wrap onto the following lines, so the item is joined before
-# the name is read and every line it spans is marked.
-function mark_env_secret_values(    i, j, end, ind, key_ind, name, sensitive, text) {
+# the name is read and every line it spans is marked. The join runs to the
+# closing brace with no line limit, and an item that never closes is masked
+# to the end of the document, because YAML reads the remainder as its value.
+function mark_env_secret_values(    i, j, end, ind, key_ind, name, sensitive, text, closed) {
     for (i = 1; i <= document_length; i++) {
         env_secret[i] = 0
         env_flow[i] = 0
@@ -450,13 +483,32 @@ function mark_env_secret_values(    i, j, end, ind, key_ind, name, sensitive, te
             # item is marked, because the value can sit on any of them.
             text = document[i]
             end = i
+            closed = 0
             flow_quote = ""
-            if (flow_scan(document[i], 0) == 0) {
-                for (j = i + 1; j <= document_length && j <= i + 100; j++) {
+            if (flow_scan(document[i], 0) != 0) {
+                closed = 1
+            } else {
+                # Join through the brace that closes the item. There is no
+                # line cap: a name or value beyond a fixed limit would
+                # print, so the document end is the only limit.
+                for (j = i + 1; j <= document_length; j++) {
                     text = text " " document[j]
                     end = j
-                    if (flow_scan(document[j], flow_depth) != 0) break
+                    if (flow_scan(document[j], flow_depth) != 0) {
+                        closed = 1
+                        break
+                    }
                 }
+            }
+            if (!closed) {
+                # An item that never closes extends to the end of the
+                # document under YAML flow rules, so the remainder is
+                # treated as its value.
+                for (j = i; j <= document_length; j++) {
+                    env_secret[j] = 1
+                    env_flow[j] = 1
+                }
+                continue
             }
             if (!match(text, /(^|[{,[:space:]])name:[[:space:]]*("[^"]*"|\047[^\047]*\047|[^,}]*)/)) continue
             name = substr(text, RSTART, RLENGTH)
