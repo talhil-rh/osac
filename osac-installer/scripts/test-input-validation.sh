@@ -1340,6 +1340,7 @@ cm_file_key="configmap-file-key-$(date +%s)-$$"
 cm_file_auth="configmap-file-auth-$(date +%s)-$$"
 cm_file_uri="configmap-file-uri-$(date +%s)-$$"
 cm_file_json="configmap-file-json-$(date +%s)-$$"
+cm_file_nested="configmap-file-nested-$(date +%s)-$$"
 cat >"${TMP_DIR}/dryrun-configmap-file.yaml" <<CM_FILE_EOF
 netbox:
   extraDeploy:
@@ -1360,6 +1361,11 @@ netbox:
           Authorization: Bearer ${cm_file_auth}
           uri = postgres://user:${cm_file_uri}@db/app
           {"password":"${cm_file_json}"}
+          private_key: |
+            key-material-line
+            ${cm_file_nested}
+          certificate: |
+            readable-cert-line
           author = readable
 CM_FILE_EOF
 if ! make -C "${INSTALLER_DIR}" --no-print-directory \
@@ -1385,6 +1391,10 @@ grep -Fq "${cm_file_uri}" "${TMP_DIR}/dryrun-configmap-file.out" \
   && fail "dry-run-configmap-file-redaction: URL userinfo survived"
 grep -Fq "${cm_file_json}" "${TMP_DIR}/dryrun-configmap-file.out" \
   && fail "dry-run-configmap-file-redaction: an inline JSON value survived"
+grep -Fq "${cm_file_nested}" "${TMP_DIR}/dryrun-configmap-file.out" \
+  && fail "dry-run-configmap-file-redaction: a nested block scalar survived"
+grep -Fq 'key-material-line' "${TMP_DIR}/dryrun-configmap-file.out" \
+  && fail "dry-run-configmap-file-redaction: a nested block body survived"
 grep -q 'name: netbox-file-config' "${TMP_DIR}/dryrun-configmap-file.out" \
   || fail "dry-run-configmap-file-redaction: the overlay ConfigMap is missing"
 grep -q 'password = <redacted>' "${TMP_DIR}/dryrun-configmap-file.out" \
@@ -1397,6 +1407,10 @@ grep -q 'postgres://<redacted>@db/app' "${TMP_DIR}/dryrun-configmap-file.out" \
   || fail "dry-run-configmap-file-redaction: URL userinfo was not masked"
 grep -q '{"password":"<redacted>"}' "${TMP_DIR}/dryrun-configmap-file.out" \
   || fail "dry-run-configmap-file-redaction: an inline JSON field was not masked"
+grep -q 'private_key: <redacted>' "${TMP_DIR}/dryrun-configmap-file.out" \
+  || fail "dry-run-configmap-file-redaction: a nested block key was not masked"
+grep -q 'readable-cert-line' "${TMP_DIR}/dryrun-configmap-file.out" \
+  || fail "dry-run-configmap-file-redaction: a non-credential block was dropped"
 grep -q 'author = readable' "${TMP_DIR}/dryrun-configmap-file.out" \
   || fail "dry-run-configmap-file-redaction: a non-credential line was masked"
 

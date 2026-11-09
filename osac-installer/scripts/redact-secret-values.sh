@@ -232,6 +232,7 @@ function mark_role_secret_names(    i, j, rule_end, rule_indent, key_ind, res_se
 function flush_document(    index_line, metadata, name) {
     kind = ""; endpoint_configmap = 0; in_payload = 0; env_block = 0
     config_block = 0; config_file_block = 0; env_await_value = 0
+    file_nested = 0; file_nested_indent = 0
     role_rn_block = 0; dns_block = 0
     configmap_document = 0; configmap_data = 0
     payload_flow = 0; payload_flow_depth = 0
@@ -319,7 +320,17 @@ function redact_line(line, line_no) {
         match($0, /^ */)
         if ($0 !~ /^ *$/ && RLENGTH <= config_file_indent) {
             config_file_block = 0
+            file_nested = 0
         } else {
+            # A block scalar value under a masked credential key is part of
+            # that key value, so its body is dropped with it; the nested
+            # block ends at the first non-blank line at or shallower than
+            # the key.
+            if (file_nested) {
+                match($0, /^ */)
+                if ($0 ~ /^ *$/ || RLENGTH > file_nested_indent) return
+                file_nested = 0
+            }
             file_line = $0
             file_prefix = ""
             file_body = file_line
@@ -347,7 +358,16 @@ function redact_line(line, line_no) {
                     # after it, so `password: x`, `password=x` and
                     # `"token": "x"` all keep their shape.
                     if (match(file_body, /[:=][[:space:]]*/)) {
-                        file_body = substr(file_body, 1, RSTART + RLENGTH - 1) "<redacted>"
+                        cut = RSTART + RLENGTH - 1
+                        # A block scalar indicator (| or >, with any chomping
+                        # suffix) means the value continues on deeper-indented
+                        # lines, which are dropped with the key.
+                        if (substr(file_body, cut + 1) ~ /^[|>]/) {
+                            match(file_line, /^ */)
+                            file_nested_indent = RLENGTH
+                            file_nested = 1
+                        }
+                        file_body = substr(file_body, 1, cut) "<redacted>"
                     }
                 }
             }
@@ -540,6 +560,7 @@ function redact_line(line, line_no) {
         match($0, /^ */)
         config_file_indent = RLENGTH
         config_file_block = 1
+        file_nested = 0
     }
     if (in_payload) {
         # Block-scalar body lines (indent deeper than the entry keys) are

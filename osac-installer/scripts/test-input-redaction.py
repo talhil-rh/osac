@@ -112,6 +112,11 @@ class InputRedactionTests(unittest.TestCase):
             f"    encryption_key: {self.password}\n"
             f"    export SIGNING_KEY={self.token}\n"
             f"    signingKey: {self.token}\n"
+            f"    private_key: |\n"
+            "      key-material-line\n"
+            f"      {self.token}\n"
+            "    certificate: |\n"
+            "      readable-cert-line\n"
             f"    Authorization: Bearer {self.token}\n"
             f"    uri = postgres://user:{self.password}@db/app\n"
             f'    {{"password":"{self.token}"}}\n'
@@ -143,6 +148,9 @@ class InputRedactionTests(unittest.TestCase):
         self.assertIn("encryption_key: <redacted>", result.stdout)
         self.assertIn("export SIGNING_KEY=<redacted>", result.stdout)
         self.assertIn("signingKey: <redacted>", result.stdout)
+        self.assertIn("private_key: <redacted>", result.stdout)
+        self.assertNotIn("key-material-line", result.stdout)
+        self.assertIn("readable-cert-line", result.stdout)
         self.assertIn("Authorization: <redacted>", result.stdout)
         self.assertIn("postgres://<redacted>@db/app", result.stdout)
         self.assertIn('{"password":"<redacted>"}', result.stdout)
@@ -172,6 +180,29 @@ class InputRedactionTests(unittest.TestCase):
         self.assertEqual(result.stdout.count("data: {<redacted>}"), 1)
         self.assertIn("name: flow-multiline", result.stdout)
         self.assertIn("name: readable", result.stdout)
+
+    def test_nested_block_scalar_under_credential_key_is_dropped(self):
+        """Check a block scalar value under a credential key loses its body."""
+        manifest = (
+            "kind: ConfigMap\nmetadata:\n  name: nested-scalars\n"
+            "data:\n  settings.yaml: |\n"
+            "    token: |-\n"
+            f"      {self.token}\n"
+            "    password: >\n"
+            f"      {self.password}\n"
+            "    author = readable\n"
+            "    certificate: |\n"
+            "      certificate-body\n"
+        )
+        result = subprocess.run(
+            [str(INSTALLER / "scripts/redact-secret-values.sh")],
+            input=manifest, text=True, capture_output=True, check=True,
+        )
+        self.assert_private(result.stdout + result.stderr)
+        self.assertIn("token: <redacted>", result.stdout)
+        self.assertIn("password: <redacted>", result.stdout)
+        self.assertIn("author = readable", result.stdout)
+        self.assertIn("certificate-body", result.stdout)
 
     def test_url_userinfo_is_masked_outside_payloads(self):
         """Check userinfo is masked in ConfigMap and env values."""
