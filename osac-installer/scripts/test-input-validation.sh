@@ -1347,6 +1347,8 @@ cm_file_json="configmap-file-json-$(date +%s)-$$"
 cm_file_json_escaped="configmap-file-json-escaped-$(date +%s)-$$"
 cm_file_json_backslash="configmap-file-json-backslash-$(date +%s)-$$"
 cm_file_nested="configmap-file-nested-$(date +%s)-$$"
+cm_file_single="configmap-file-single-$(date +%s)-$$"
+cm_file_single_json="configmap-file-single-json-$(date +%s)-$$"
 cat >"${TMP_DIR}/dryrun-configmap-file.yaml" <<CM_FILE_EOF
 netbox:
   extraDeploy:
@@ -1375,6 +1377,9 @@ netbox:
           certificate: |
             readable-cert-line
           author = readable
+        netbox-single.conf: host = netbox-db password = ${cm_file_single} author = readable
+        events-single.json: '{"token":"${cm_file_single_json}","author":"readable"}'
+        settings-single.conf: theme = dark
 CM_FILE_EOF
 if ! make -C "${INSTALLER_DIR}" --no-print-directory \
     -o helm-deps -o helm-infra-deps -o helm-osac-deps \
@@ -1429,6 +1434,19 @@ grep -q 'readable-cert-line' "${TMP_DIR}/dryrun-configmap-file.out" \
   || fail "dry-run-configmap-file-redaction: a non-credential block was dropped"
 grep -q 'author = readable' "${TMP_DIR}/dryrun-configmap-file.out" \
   || fail "dry-run-configmap-file-redaction: a non-credential line was masked"
+# The same payload can be collapsed onto the entry line instead of a block
+# scalar; the value is masked as a whole, while a one-line value without a
+# credential stays readable.
+grep -Fq "${cm_file_single}" "${TMP_DIR}/dryrun-configmap-file.out" \
+  && fail "dry-run-configmap-file-redaction: a single-line file password survived"
+grep -Fq "${cm_file_single_json}" "${TMP_DIR}/dryrun-configmap-file.out" \
+  && fail "dry-run-configmap-file-redaction: a single-line JSON credential survived"
+grep -q 'netbox-single.conf: <redacted>' "${TMP_DIR}/dryrun-configmap-file.out" \
+  || fail "dry-run-configmap-file-redaction: a single-line file value was not masked"
+grep -q 'events-single.json: <redacted>' "${TMP_DIR}/dryrun-configmap-file.out" \
+  || fail "dry-run-configmap-file-redaction: a single-line JSON value was not masked"
+grep -q 'theme = dark' "${TMP_DIR}/dryrun-configmap-file.out" \
+  || fail "dry-run-configmap-file-redaction: a non-credential one-line value was masked"
 
 # Container env entries are a plain-text channel for credentials: callers
 # can inject passwords into workload specs through values overlays (for

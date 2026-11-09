@@ -14,6 +14,7 @@ import unittest
 
 INSTALLER = Path(__file__).resolve().parents[1]
 HELM = shutil.which(os.environ.get("HELM_BIN", "helm"))
+HELM4 = shutil.which(os.environ.get("HELM4_BIN", "helm4"))
 
 
 class InputRedactionTests(unittest.TestCase):
@@ -158,6 +159,30 @@ class InputRedactionTests(unittest.TestCase):
                          "oauth: oidc", "log_level=debug",
                          "key: readable-key", "tls.key: /etc/tls/tls.key"):
             self.assertIn(readable, result.stdout)
+
+    def test_single_line_configmap_file_credentials_are_masked(self):
+        """Check one-line file payloads are masked as a whole."""
+        manifest = (
+            "kind: ConfigMap\nmetadata:\n  name: single-line-file\n"
+            "data:\n"
+            f"  netbox.conf: host = netbox-db password = {self.password}\n"
+            f"  events.json: '{{\"token\":\"{self.token}\","
+            "\"author\":\"readable\"}'\n"
+            f"  nested.json: '{{\"a\":{{\"password\":\"{self.token}\"}}}}'\n"
+            f"  query.conf: https://netbox-db/app?token={self.token}\n"
+            "  settings.conf: author = readable\n"
+            "  plain.conf: hello = world\n"
+        )
+        result = subprocess.run(
+            [str(INSTALLER / "scripts/redact-secret-values.sh")],
+            input=manifest, text=True, capture_output=True, check=True,
+        )
+        self.assert_private(result.stdout + result.stderr)
+        for masked in ("netbox.conf: <redacted>", "events.json: <redacted>",
+                       "nested.json: <redacted>", "query.conf: <redacted>"):
+            self.assertIn(masked, result.stdout)
+        self.assertIn("settings.conf: author = readable", result.stdout)
+        self.assertIn("plain.conf: hello = world", result.stdout)
 
     def test_flow_style_secret_payloads_are_masked(self):
         """Check flow-style data/stringData maps are masked as a whole."""
@@ -489,7 +514,7 @@ class InputRedactionTests(unittest.TestCase):
                 " schema(s) in the following chart(s):\nosac:\n"
                 "- at '/global/real': rejected\n"
                 f"- at '/{self.hostname}/path': value\n",
-                "/global/real: violates the values schema",
+                "global/real: violates the values schema",
                 True,
             ),
         )
@@ -588,6 +613,47 @@ class InputRedactionTests(unittest.TestCase):
         )
         self.assertIn("bmf.netbox.tokenValue: Invalid type; expected string",
                       specific.stderr)
+
+    def assert_real_schema_error_is_private(self, helm):
+        """Feed a real Helm schema failure through the private gate."""
+        chart = self.directory / "schema-chart"
+        (chart / "templates").mkdir(parents=True)
+        (chart / "Chart.yaml").write_text(
+            "apiVersion: v2\nname: schema-chart\nversion: 0.1.0\n")
+        (chart / "values.yaml").write_text("password: 1\n")
+        (chart / "values.schema.json").write_text(json.dumps({
+            "type": "object",
+            "properties": {"password": {"type": "integer"}},
+            "required": ["password"],
+        }))
+        (chart / "templates" / "probe.yaml").write_text(
+            "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: probe\n")
+        render = subprocess.run(
+            [helm, "template", "release", str(chart),
+             "--set", f"password={self.password}"],
+            text=True, capture_output=True,
+        )
+        self.assertNotEqual(render.returncode, 0)
+        self.assertIn("values don", render.stderr)
+        result = subprocess.run(
+            ["bash", "-c", 'source "$1"; offline_render_error "$2"',
+             "bash", str(INSTALLER / "scripts/lib.sh"), render.stderr],
+            text=True, capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assert_private(result.stdout + result.stderr)
+        self.assertIn("offline chart rendering failed", result.stderr)
+        self.assertIn("password: violates the values schema", result.stderr)
+
+    @unittest.skipUnless(HELM, "helm 3 is not installed")
+    def test_offline_render_error_real_helm3_schema_error_is_private(self):
+        """Check a real Helm 3 schema failure names the path, not the value."""
+        self.assert_real_schema_error_is_private(HELM)
+
+    @unittest.skipUnless(HELM4, "helm 4 is not installed")
+    def test_offline_render_error_real_helm4_schema_error_is_private(self):
+        """Check a real Helm 4 schema failure names the path, not the value."""
+        self.assert_real_schema_error_is_private(HELM4)
 
     def test_make_gate_real_aap_error_is_private(self):
         """Check the real AAP render failure through the make gate stays private."""

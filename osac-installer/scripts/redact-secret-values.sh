@@ -48,7 +48,9 @@
 # any other key is a configuration-file payload, and a credential
 # assignment inside it (`password: x`, `token = x`, `"client_secret": x`,
 # also behind an `export ` or `- ` prefix) is masked in place so the rest
-# of the file stays readable. Resource
+# of the file stays readable; the same payload collapsed onto one line
+# (`app.conf: host=db password=x`) is masked as a whole, because that
+# line has no other content to keep. Resource
 # structure, Secret/ConfigMap names and keys, and every other value stay
 # readable so the dry run remains useful for review.
 set -euo pipefail
@@ -176,6 +178,23 @@ function mask_json_credentials(line,    out, rest, obj, key, val) {
     }
     return out rest
 }
+# True when a single-line configuration-file value carries a credential
+# assignment anywhere in it: file content collapsed onto its key line
+# (`host=db password=x`), an inline JSON object (`{"token":"x"}`), or a
+# URL query (`?token=x`). Detection only; the caller masks the whole
+# value because a one-line payload has no other line to keep readable.
+function has_inline_credential(text,    rest, found, key) {
+    rest = text
+    while (match(rest, /(^|[[:space:];,&?{])["\047]?[A-Za-z0-9_.-]+["\047]?[[:space:]]*[:=]/)) {
+        found = substr(rest, RSTART, RLENGTH)
+        key = found
+        sub(/^[^A-Za-z0-9_.-]*/, "", key)
+        sub(/["\047]?[[:space:]]*[:=]$/, "", key)
+        if (credential_file_key(key)) return 1
+        rest = substr(rest, RSTART + RLENGTH)
+    }
+    return 0
+}
 # Indent of the key text on a line, counting a list-item dash as
 # structure so `- resources:` and `  resources:` compare as siblings.
 function key_indent(line,    indent) {
@@ -301,7 +320,7 @@ function flush_document(    index_line, metadata, name) {
     config_block = 0; config_file_block = 0
     file_nested = 0; file_nested_indent = 0
     role_rn_block = 0; dns_block = 0
-    configmap_document = 0; configmap_data = 0
+    configmap_document = 0; configmap_data = 0; configmap_binary = 0
     payload_flow = 0; payload_flow_depth = 0
     for (index_line = 1; index_line <= document_length; index_line++) {
         $0 = document[index_line]
@@ -359,8 +378,8 @@ function redact_line(line, line_no) {
         return
     }
     if (endpoint_configmap && /^data:[[:space:]]*(#.*)?$/) { in_payload = 1; print; return }
-    if (configmap_document && /^(data|binaryData):[[:space:]]*(#.*)?$/) { configmap_data = 1; print; return }
-    if (/^[^ #]/) { in_payload = 0; configmap_data = 0 }
+    if (configmap_document && /^(data|binaryData):[[:space:]]*(#.*)?$/) { configmap_data = 1; configmap_binary = ($0 ~ /^binaryData:/); print; return }
+    if (/^[^ #]/) { in_payload = 0; configmap_data = 0; configmap_binary = 0 }
     # A masked block-scalar env value: its body lines are deeper-indented
     # than the value line itself and are dropped; a blank line inside the
     # block is dropped too. The first line at or shallower than the value
@@ -624,6 +643,23 @@ function redact_line(line, line_no) {
         config_file_indent = RLENGTH
         config_file_block = 1
         file_nested = 0
+    }
+    # A ConfigMap data value can also be that configuration file collapsed
+    # onto one line (`netbox.conf: host = db password = x`), which the
+    # block-scalar rule above never sees. A credential anywhere in the
+    # value makes the whole line secret-bearing, so the value is masked as
+    # a unit; a single-line value without a credential stays readable.
+    if (configmap_data && !configmap_binary && !config_block \
+        && $0 ~ /^  [^ :][^:]*: [^|>]/) {
+        config_key = $0
+        sub(/:.*/, "", config_key)
+        sub(/^[[:space:]]+/, "", config_key)
+        config_val = $0
+        sub(/^[^:]*:[[:space:]]*/, "", config_val)
+        if (!credential_name(config_key) \
+            && tolower(config_key) !~ /(url|host|addr|endpoint)/ \
+            && has_inline_credential(config_val))
+            sub(/: .*/, ": <redacted>")
     }
     if (in_payload) {
         # Block-scalar body lines (indent deeper than the entry keys) are

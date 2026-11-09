@@ -206,6 +206,10 @@ offline_render_error() {
                             " violates the values schema"
                     } else if (match($0, "^- at " q "[^" q "]*" q ":")) {
                         path = substr($0, RSTART + 6, RLENGTH - 8)
+                        # Helm 4 writes the path with a leading slash; drop
+                        # it so both schema error formats name the field the
+                        # same way.
+                        sub(/^\//, "", path)
                         if (path ~ /^[A-Za-z0-9_.~\/-]+$/)
                             print path ": violates the values schema"
                     } else if (match($0, "^- [A-Za-z0-9_.()-]+: ")) {
