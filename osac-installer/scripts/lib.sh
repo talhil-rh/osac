@@ -143,8 +143,24 @@ render_osac_chart_offline() {
     return 1
 }
 
+# Render a chart offline and report only value-free diagnostics on failure.
+# The arguments pass through to helm template unchanged, so every gate keeps
+# its own release name, values files, and --set inputs. Helm echoes the
+# offending value in some schema errors (Helm 3.22 and later print it for
+# pattern failures) and in template fail/required messages, so the raw
+# diagnostics never reach the terminal or the collected CI logs.
+# Usage: render_chart_offline [HELM_ARGS...]
+render_chart_offline() {
+    local err
+    if err=$(helm template "$@" 2>&1 >/dev/null); then
+        return 0
+    fi
+    offline_render_error "${err}"
+    return 1
+}
+
 offline_render_error() {
-    echo "ERROR: offline OSAC chart rendering failed; check chart dependencies, values schema and template requirements. Helm diagnostics are suppressed because they may contain sensitive input values." >&2
+    echo "ERROR: offline chart rendering failed; check chart dependencies, values schema and template requirements. Helm diagnostics are suppressed because they may contain sensitive input values." >&2
     case "$1" in
         *bmf.netbox.tokenValue*"Invalid type"*|*/bmf/netbox/tokenValue*"got number, want string"*)
             echo "bmf.netbox.tokenValue: Invalid type; expected string" >&2 ;;
@@ -158,16 +174,21 @@ offline_render_error() {
             # input. Helm 3 prints "- a.b.c: <message>"; Helm 4 prints
             # "- at '/a/b/c': <message>" and its message may embed the
             # value, so both matchers drop everything after the path and
-            # the charset excludes value-shaped characters. Errors without
-            # a recognizable path still get the generic line alone. The
-            # fabricDomainInventory entry key is customer-supplied (a
-            # hostname) and can itself appear in the path, so that path
-            # is printed without the entry key.
+            # the charset excludes value-shaped characters. A template
+            # fail/required error prints "execution error at
+            # (CHART/templates/FILE:L:C): <message>", where the message
+            # can embed the value; only the chart-relative location is
+            # printed, and it is a static chart path, not customer data.
+            # Errors without a recognizable path still get the generic
+            # line alone. The fabricDomainInventory entry key is
+            # customer-supplied (a hostname) and can itself appear in the
+            # path, so that path is printed without the entry key.
             printf '%s\n' "$1" | LC_ALL=C sed -nE \
                 -e "s|^- at '/operator/fabricDomainInventory/[^']*'.*|operator.fabricDomainInventory: violates the values schema|p" \
                 -e 's/^- operator\.fabricDomainInventory\.[^:]*: .*/operator.fabricDomainInventory: violates the values schema/p' \
                 -e "s|^- at '([A-Za-z0-9_/.~-]*)'.*|\1: violates the values schema|p" \
-                -e 's/^- ([A-Za-z0-9_.()-]+): .*/\1: violates the values schema/p' >&2 ;;
+                -e 's/^- ([A-Za-z0-9_.()-]+): .*/\1: violates the values schema/p' \
+                -e 's|.*execution error at \(([A-Za-z0-9_./-]+:[0-9]+:[0-9]+)\):.*|template check failed in \1 (message suppressed)|p' >&2 ;;
     esac
 }
 

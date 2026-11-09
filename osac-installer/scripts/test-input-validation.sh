@@ -145,7 +145,8 @@ assert_renders_first() {
     make -C "${SANDBOX}" --no-print-directory -n "${target}" "$@" \
     >"${plan}" 2>"${TMP_DIR}/plan.err" || fail "make -n ${target} $* failed"
   local first_render first_mutation
-  first_render=$(grep -n 'helm template' "${plan}" | head -1 | cut -d: -f1)
+  first_render=$(grep -nE 'helm template|render_chart_offline' "${plan}" \
+    | head -1 | cut -d: -f1)
   first_mutation=$(grep -nE "${mutation_commands}" "${plan}" | head -1 | cut -d: -f1)
   [ -n "${first_render}" ] || fail "${target} ($*): no offline render in the plan"
   if [ -n "${first_mutation}" ] && [ "${first_mutation}" -lt "${first_render}" ]; then
@@ -251,7 +252,8 @@ MOCK_LOG="${LOG}" PATH="${STUB_BIN}:${PATH}" \
 # vmaas-ci base plus the multicluster overlay) is asserted from the make
 # database, proving the gate's osac-infra render applies the overlay.
 sed -n '1,/prepare-remote-cluster/p' "${mc_plan}" | join_continuations \
-  | grep 'helm template osac-infra' | grep -Fq '${INFRA_VALUES_EXTRA}' \
+  | grep -E '(helm template|render_chart_offline) osac-infra' \
+  | grep -Fq '${INFRA_VALUES_EXTRA}' \
   || fail "install-multicluster: the gate render omits the values-list token"
 mc_db="${TMP_DIR}/multicluster.db"
 MOCK_LOG="${LOG}" PATH="${STUB_BIN}:${PATH}" \
@@ -276,8 +278,9 @@ MOCK_LOG="${LOG}" PATH="${STUB_BIN}:${PATH}" \
     INFRA_HELM_ARGS='--set topolvm.enabled=true' \
     >"${infra_args_plan}" 2>/dev/null || fail "make -n install-infra (openshift) failed"
 infra_arg_cmds=$(join_continuations <"${infra_args_plan}" \
-  | sed -E 's/(helm (template|upgrade))/\n\1/g' \
-  | grep -E 'helm (template|upgrade).* osac-(infra|deps) ' || true)
+  | sed -E 's/(helm (template|upgrade)|render_chart_offline)/\n\1/g' \
+  | grep -E '(helm (template|upgrade)|render_chart_offline).* osac-(infra|deps) ' \
+  || true)
 [ -n "${infra_arg_cmds}" ] \
   || fail "install-infra (openshift): no osac-infra/osac-deps helm commands in the plan"
 while IFS= read -r infra_cmd; do
@@ -301,8 +304,9 @@ for ca_platform in kind openshift; do
     OIDC_IDP_CA_FILE=/nonexistent-ca.pem \
     >"${ca_plan}" 2>/dev/null || fail "make -n install-infra (${ca_platform}) failed"
   ca_cmds=$(join_continuations <"${ca_plan}" \
-    | sed -E 's/(helm (template|upgrade))/\n\1/g' \
-    | grep -E 'helm (template|upgrade).* osac-infra ' || true)
+    | sed -E 's/(helm (template|upgrade)|render_chart_offline)/\n\1/g' \
+    | grep -E '(helm (template|upgrade)|render_chart_offline).* osac-infra ' \
+    || true)
   [ -n "${ca_cmds}" ] \
     || fail "install-infra (${ca_platform}): no osac-infra helm commands in the plan"
   while IFS= read -r ca_cmd; do

@@ -59,9 +59,11 @@ set -euo pipefail
 # Secret cannot leak its scope into the next document, and any other
 # column-0 key ends the payload block. The metadata `name:` rule only
 # applies outside payloads, so a payload entry named `name` falls through
-# to masking instead of printing its value. An env entry's `value:` line
-# always directly follows its `- name:` line in Helm's rendering, so the
-# credential-name check only has to look one line ahead; a block-scalar
+# to masking instead of printing its value. Helm renders an env item's
+# `name:` before its `value:`, but a values overlay can add arbitrary
+# YAML (netbox.extraDeploy), so each document's env items are pre-scanned
+# and the value line is masked whatever the key order, including a
+# flow-style item whose name and value share the line; a block-scalar
 # value keeps its body on the following, deeper-indented lines, which are
 # dropped until a line at or shallower than the value line's indent ends
 # the block. An RBAC rule may list its keys in any order, so each
@@ -116,6 +118,18 @@ function credential_name(name,    lower) {
     return lower ~ /(password|passwd|passphrase|secret|token|credential|api_key|private_key|access_key|auth|session|dsn|conn(ection)?_?str)/ \
         || lower ~ /(^|[_-])key$/ \
         || name ~ /[a-z0-9]Key$/
+}
+# True when an env variable name marks its value as confidential or as
+# carrying endpoint/identity data the dry run must not print.
+function sensitive_env_name(name,    lower) {
+    lower = tolower(name)
+    return credential_name(name) \
+        || lower ~ /(url|host|endpoint|addr)/ \
+        || lower ~ /(^|_)(svc|service)(_|$)/ \
+        || lower ~ /(^|_)(tenant|tenants)(_|$)/ \
+        || lower ~ /(^|_)(user|users|email|emails)(_|$)/ \
+        || lower ~ /(^|_)image$/ \
+        || lower == "kafka_brokers"
 }
 # True when a key inside a configuration-file payload is credential-shaped.
 # Tighter than credential_name(): file content is prose-like, so the
@@ -229,9 +243,55 @@ function mark_role_secret_names(    i, j, rule_end, rule_indent, key_ind, res_se
         }
     }
 }
+# Marks value lines of env list items whose sibling name is sensitive,
+# whatever the key order inside the item. Helm renders name before value,
+# but a values overlay can introduce arbitrary YAML (netbox.extraDeploy),
+# so the one-line lookahead in redact_line alone would miss a value written
+# before its name. Flow-style items (`- {name: X, value: Y}`) are marked
+# whole and masked in place, because name and value share the item line.
+function mark_env_secret_values(    i, j, end, ind, key_ind, name, sensitive) {
+    for (i = 1; i <= document_length; i++) env_secret[i] = 0
+    for (i = 1; i <= document_length; i++) {
+        if (document[i] !~ /^[[:space:]]*- [^ ].*:/) continue
+        if (document[i] ~ /^[[:space:]]*- \{/) {
+            if (!match(document[i], /name:[[:space:]]*("[^"]*"|\047[^\047]*\047|[^,}]*)/)) continue
+            name = substr(document[i], RSTART + 5, RLENGTH - 5)
+            gsub(/["\047]/, "", name)
+            sub(/^[[:space:]]+/, "", name)
+            sub(/[[:space:]]+$/, "", name)
+            if (sensitive_env_name(name)) env_secret[i] = 1
+            continue
+        }
+        match(document[i], /^ */)
+        ind = RLENGTH
+        key_ind = key_indent(document[i])
+        end = document_length
+        for (j = i + 1; j <= document_length; j++) {
+            if (document[j] ~ /^[[:space:]]*$/ || document[j] ~ /^[[:space:]]*#/) continue
+            match(document[j], /^ */)
+            if (RLENGTH < ind) { end = j - 1; break }
+            if (RLENGTH == ind && document[j] ~ /^[[:space:]]*- [^ ].*:/) { end = j - 1; break }
+        }
+        sensitive = 0
+        for (j = i; j <= end; j++) {
+            if (key_indent(document[j]) != key_ind) continue
+            if (document[j] ~ /^[[:space:]]*(- )?name: /) {
+                name = document[j]
+                sub(/^[[:space:]]*(- )?name: */, "", name)
+                gsub(/["\047]/, "", name)
+                sensitive = sensitive_env_name(name)
+            }
+        }
+        if (!sensitive) continue
+        for (j = i; j <= end; j++) {
+            if (key_indent(document[j]) != key_ind) continue
+            if (document[j] ~ /^[[:space:]]*(- )?value: /) env_secret[j] = 1
+        }
+    }
+}
 function flush_document(    index_line, metadata, name) {
     kind = ""; endpoint_configmap = 0; in_payload = 0; env_block = 0
-    config_block = 0; config_file_block = 0; env_await_value = 0
+    config_block = 0; config_file_block = 0
     file_nested = 0; file_nested_indent = 0
     role_rn_block = 0; dns_block = 0
     configmap_document = 0; configmap_data = 0
@@ -252,6 +312,7 @@ function flush_document(    index_line, metadata, name) {
             || name == "osac-infra-mce-config")
     configmap_document = kind == "ConfigMap"
     if (kind == "Role" || kind == "ClusterRole") mark_role_secret_names()
+    mark_env_secret_values()
     for (index_line = 1; index_line <= document_length; index_line++) {
         redact_line(document[index_line], index_line)
         delete document[index_line]
@@ -432,19 +493,16 @@ function redact_line(line, line_no) {
             $0 = img_head img_quote "<redacted>/" img_val
         }
     }
-    if (env_await_value) {
-        # Helm renders template comments inside env lists too, so a
-        # comment (or blank) line between the name and value lines must
-        # not end the one-line lookahead for the value line.
-        if ($0 ~ /^ *#/ || $0 ~ /^ *$/) { print; return }
-        env_await_value = 0
-        if ($0 ~ /^[[:space:]]+value: ./ && (credential_name(env_name) \
-            || tolower(env_name) ~ /(url|host|endpoint|addr)/ \
-            || tolower(env_name) ~ /(^|_)(svc|service)(_|$)/ \
-            || tolower(env_name) ~ /(^|_)(tenant|tenants)(_|$)/ \
-            || tolower(env_name) ~ /(^|_)(user|users|email|emails)(_|$)/ \
-            || tolower(env_name) ~ /(^|_)image$/ \
-            || tolower(env_name) == "kafka_brokers")) {
+    # An env value is masked when the document pre-scan paired it with a
+    # sensitive name, whatever the key order inside the item and whether
+    # the item is block- or flow-style. A block-scalar value keeps its
+    # body on deeper-indented lines, which are dropped with the value.
+    if (env_secret[line_no]) {
+        if ($0 ~ /^[[:space:]]*- \{[^}]*value:/) {
+            # Flow item: keep the closing brace and any fields after the
+            # value, and mask only the value scalar (quoted or plain).
+            sub(/value:[[:space:]]*("[^"]*"|\047[^\047]*\047|[^,}]*)/, "value: <redacted>")
+        } else if ($0 ~ /value: /) {
             if ($0 ~ /value: [|>]/) {
                 match($0, /^ */)
                 env_block_indent = RLENGTH
@@ -452,16 +510,6 @@ function redact_line(line, line_no) {
             }
             sub(/value: .*/, "value: <redacted>")
         }
-    }
-    if ($0 ~ /^[[:space:]]*- name: .+/) {
-        env_name = $0
-        sub(/^[[:space:]]*- name: */, "", env_name)
-        # Helm quotes env names only when needed, but the redactor runs
-        # over whole manifests, so a quoted name must match too: strip
-        # the YAML quotes (either style) before the exact KAFKA_BROKERS
-        # compare (the regex checks are substring-based and quote-agnostic).
-        gsub(/["\047]/, "", env_name)
-        env_await_value = 1
     }
     # RBAC rules that target Secrets name the Secret in resourceNames, and
     # a caller-set name (netbox.apiTokenSecret) carries the same

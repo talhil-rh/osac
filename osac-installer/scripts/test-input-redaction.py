@@ -225,6 +225,26 @@ class InputRedactionTests(unittest.TestCase):
         self.assertEqual(result.stdout.count("postgres://<redacted>@db/app"), 2)
         self.assertIn("mode: foreground", result.stdout)
 
+    def test_env_value_masking_is_order_independent(self):
+        """Check env masking covers value-before-name and flow items."""
+        manifest = (
+            "kind: Deployment\nmetadata:\n  name: web\n"
+            "spec:\n  containers:\n    - name: app\n      env:\n"
+            f"        - value: {self.token}\n          name: DB_PASSWORD\n"
+            f"        - {{name: API_TOKEN, value: {self.token}}}\n"
+            "        - {name: PLAIN_SETTING, value: readable-flow}\n"
+            f"        - name: BIND_PASSWORD\n          value: {self.token}\n"
+        )
+        result = subprocess.run(
+            [str(INSTALLER / "scripts/redact-secret-values.sh")],
+            input=manifest, text=True, capture_output=True, check=True,
+        )
+        self.assert_private(result.stdout + result.stderr)
+        self.assertEqual(result.stdout.count("value: <redacted>"), 3)
+        self.assertIn(
+            "{name: PLAIN_SETTING, value: readable-flow}", result.stdout
+        )
+
     def test_netbox_extra_deploy_real_render(self):
         """Check a real render whose extraDeploy payload precedes its identity."""
         for data_first in (False, True):
@@ -360,9 +380,61 @@ class InputRedactionTests(unittest.TestCase):
                 )
                 self.assertNotEqual(result.returncode, 0)
                 self.assert_private(result.stdout + result.stderr)
-                self.assertIn("offline OSAC chart", result.stderr)
+                self.assertIn("offline chart rendering failed", result.stderr)
                 self.assertIn("no cluster changes", result.stderr)
                 self.assertEqual(len(calls.read_text().splitlines()), 2 if retry else 1)
+
+    def test_offline_render_error_reports_template_location_without_message(self):
+        """Check a template check failure names its location, not its value."""
+        message = (
+            "Error: execution error at "
+            "(osac/templates/networking.yaml:42:7): invalid peer "
+            f"{self.hostname}\n\nUse --debug flag to render out invalid YAML\n"
+        )
+        result = subprocess.run(
+            ["bash", "-c", 'source "$1"; offline_render_error "$2"',
+             "bash", str(INSTALLER / "scripts/lib.sh"), message],
+            text=True, capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assert_private(result.stdout + result.stderr)
+        self.assertIn("offline chart rendering failed", result.stderr)
+        self.assertIn(
+            "template check failed in osac/templates/networking.yaml:42:7"
+            " (message suppressed)",
+            result.stderr,
+        )
+
+    def test_make_gate_infra_error_is_private(self):
+        """Check a failing infra render stays private through the make gate."""
+        binary = self.directory / "bin"
+        binary.mkdir(exist_ok=True)
+        wrapper = binary / "helm"
+        wrapper.write_text(
+            '#!/usr/bin/env bash\nset -euo pipefail\n'
+            'if [[ "$1" == template && "$2" == osac-infra ]]; then\n'
+            '  echo "Error: execution error at '
+            '(osac-infra/templates/networking.yaml:7:3): $REJECTED" >&2\n'
+            '  echo "Use --debug flag to render out invalid YAML" >&2\n'
+            '  exit 1\n'
+            'fi\nexec "$REAL_HELM" "$@"\n'
+        )
+        wrapper.chmod(0o755)
+        env = {**os.environ, "PATH": f"{binary}:{os.environ['PATH']}",
+               "REAL_HELM": HELM, "REJECTED": self.hostname}
+        result = subprocess.run(
+            ["make", "--no-print-directory", "-C", str(INSTALLER),
+             "-o", "helm-osac-deps", "-o", "helm-infra-deps", "validate-inputs",
+             "PLATFORM=kind", "PROFILE=dev", "NS=osac"],
+            env=env, text=True, capture_output=True, timeout=60,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assert_private(result.stdout + result.stderr)
+        self.assertIn(
+            "template check failed in osac-infra/templates/networking.yaml:7:3",
+            result.stderr,
+        )
+        self.assertIn("no cluster changes", result.stderr)
 
     def test_offline_render_error_reports_schema_path_without_values(self):
         """Check unmatched schema failures name the path and drop the value."""
@@ -403,7 +475,7 @@ class InputRedactionTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0)
                 self.assert_private(result.stdout + result.stderr)
-                self.assertIn("offline OSAC chart", result.stderr)
+                self.assertIn("offline chart rendering failed", result.stderr)
                 self.assertIn(expected, result.stderr)
         # The three specific diagnostics still win over the path fallback.
         specific = subprocess.run(
@@ -429,7 +501,7 @@ class InputRedactionTests(unittest.TestCase):
         )
         self.assertNotEqual(result.returncode, 0)
         self.assert_private(result.stdout + result.stderr)
-        self.assertIn("offline OSAC chart", result.stderr)
+        self.assertIn("offline chart rendering failed", result.stderr)
 
 
 if __name__ == "__main__":
