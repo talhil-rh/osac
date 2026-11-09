@@ -143,6 +143,29 @@ render_osac_chart_offline() {
     return 1
 }
 
+# Dotted paths of the installer values-schema maps whose entry names come
+# from the caller: JSON-schema objects that validate their unknown keys, so
+# Helm echoes such a key in a schema error path (a serviceMonitor label that
+# is a hostname, for example). A failure under one of these maps reports only
+# the map root. The redaction tests derive the same set from every
+# charts/*/values.schema.json and fail when this list and the schemas drift,
+# so a new open map cannot start printing caller-supplied keys unnoticed. A
+# map that accepts any additional property (`"additionalProperties": true`)
+# is deliberately absent: it validates no unknown key, so no key can reach a
+# path through it.
+_LIB_OPEN_SCHEMA_MAPS=(
+    aap.instanceGroups.networkFulfillment.config
+    aap.instanceGroups.networkFulfillment.secret
+    metering.prometheusRule.labels
+    metering.serviceMonitor.labels
+    operator.fabricDomainInventory
+    operator.networkManagers.fabricManagers
+    operator.networkManagers.k8sManagers
+    operator.stall.workersJoiningByInstanceType
+    operator.vendorControllers
+    preflight.skip
+)
+
 # Render a chart offline and report only value-free diagnostics on failure.
 # The arguments pass through to helm template unchanged, so every gate keeps
 # its own release name, values files, and --set inputs. Helm echoes the
@@ -180,30 +203,26 @@ offline_render_error() {
             # than the first line of output. Nothing is read past the
             # first schema item: later items cannot be told apart from
             # such echoed text. A failure without a recognizable marker
-            # keeps the generic line alone. Open schema maps carry
-            # customer-supplied entry keys (a fabricDomainInventory
-            # hostname, a vendorControllers or networkManagers
-            # identifier, a workersJoiningByInstanceType name), and those
-            # keys can appear in the path, so such a path is printed
-            # without the entry key.
-            printf '%s\n' "$1" | LC_ALL=C awk -v q="'" '
+            # keeps the generic line alone. An open schema map in
+            # _LIB_OPEN_SCHEMA_MAPS carries caller-supplied entry keys (a
+            # serviceMonitor label that is a hostname, for example), and
+            # such a key can appear in the path, so the path is printed
+            # as the map root without the entry key.
+            local maps="${_LIB_OPEN_SCHEMA_MAPS[*]}"
+            printf '%s\n' "$1" | LC_ALL=C awk -v q="'" -v maps="${maps}" '
+                BEGIN {
+                    n_maps = split(maps, map_path, " ")
+                }
                 # Dotted name of the open values-schema map the path
                 # enters, or "" when it enters none. The segment after the
-                # map name is a customer-supplied key; Helm 4 separates
+                # map name is a caller-supplied key; Helm 4 separates
                 # path segments with a slash and Helm 3 with a dot.
-                function open_map(path,    slash) {
+                function open_map(path,    slash, i) {
                     slash = path
                     gsub(/\//, ".", slash)
-                    if (slash ~ /^operator\.fabricDomainInventory\./)
-                        return "operator.fabricDomainInventory"
-                    if (slash ~ /^operator\.vendorControllers\./)
-                        return "operator.vendorControllers"
-                    if (slash ~ /^operator\.networkManagers\.fabricManagers\./)
-                        return "operator.networkManagers.fabricManagers"
-                    if (slash ~ /^operator\.networkManagers\.k8sManagers\./)
-                        return "operator.networkManagers.k8sManagers"
-                    if (slash ~ /^operator\.stall\.workersJoiningByInstanceType\./)
-                        return "operator.stall.workersJoiningByInstanceType"
+                    for (i = 1; i <= n_maps; i++)
+                        if (index(slash, map_path[i] ".") == 1)
+                            return map_path[i]
                     return ""
                 }
                 !seen && /^Error: / {

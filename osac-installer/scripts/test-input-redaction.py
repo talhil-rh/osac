@@ -401,6 +401,38 @@ class InputRedactionTests(unittest.TestCase):
                 self.assert_private(result.stdout + result.stderr)
                 self.assertNotIn(self.token, result.stdout)
 
+    def test_flow_env_item_with_comment_stays_masked(self):
+        """Check a brace in a YAML comment does not end the flow item."""
+        manifest = (
+            "kind: Deployment\nmetadata:\n  name: web\n"
+            "spec:\n  containers:\n    - name: app\n      env:\n"
+            "        - {name: API_TOKEN, # }\n"
+            f"           value: {self.token}}}\n"
+            "        - {name: PLAIN_SETTING, # }\n"
+            "           value: readable-flow}\n"
+        )
+        result = subprocess.run(
+            [str(INSTALLER / "scripts/redact-secret-values.sh")],
+            input=manifest, text=True, capture_output=True, check=True,
+        )
+        self.assert_private(result.stdout + result.stderr)
+        self.assertNotIn(self.token, result.stdout)
+        self.assertIn("value: <redacted>}", result.stdout)
+        self.assertIn("value: readable-flow}", result.stdout)
+
+    def test_secret_flow_data_with_comment_stays_masked(self):
+        """Check a brace in a YAML comment does not end a Secret data map."""
+        manifest = (
+            "kind: Secret\nmetadata:\n  name: s\n"
+            f"data: {{a: YQ==, # }}\n  b: {self.token}}}\n"
+        )
+        result = subprocess.run(
+            [str(INSTALLER / "scripts/redact-secret-values.sh")],
+            input=manifest, text=True, capture_output=True, check=True,
+        )
+        self.assert_private(result.stdout + result.stderr)
+        self.assertNotIn(self.token, result.stdout)
+
     def test_offline_render_error_hides_set_file_path(self):
         """Check a --set-file failure does not echo the file path."""
         path = f"/srv/{self.token}/ca.pem"
@@ -781,6 +813,50 @@ class InputRedactionTests(unittest.TestCase):
                 "operator.stall.workersJoiningByInstanceType: violates the"
                 " values schema",
             ),
+            (
+                "Error: values don't meet the specifications of the schema(s)"
+                " in the following chart(s):\n"
+                "osac:\n- metering.serviceMonitor.labels."
+                f"{self.hostname}: Invalid type. Expected: string\n",
+                "metering.serviceMonitor.labels: violates the values schema",
+            ),
+            (
+                "Error: values don't meet the specifications of the schema(s)"
+                " in the following chart(s):\n"
+                "osac:\n- at '/metering/serviceMonitor/labels/"
+                f"{self.hostname}': got number, want string\n",
+                "metering.serviceMonitor.labels: violates the values schema",
+            ),
+            (
+                "Error: values don't meet the specifications of the schema(s)"
+                " in the following chart(s):\n"
+                "osac:\n- metering.prometheusRule.labels."
+                f"{self.hostname}: Invalid type\n",
+                "metering.prometheusRule.labels: violates the values schema",
+            ),
+            (
+                "Error: values don't meet the specifications of the schema(s)"
+                " in the following chart(s):\n"
+                "osac:\n- preflight.skip."
+                f"{self.hostname}: Invalid type\n",
+                "preflight.skip: violates the values schema",
+            ),
+            (
+                "Error: values don't meet the specifications of the schema(s)"
+                " in the following chart(s):\n"
+                "osac:\n- at '/aap/instanceGroups/networkFulfillment/config/"
+                f"{self.hostname}': validation failed\n",
+                "aap.instanceGroups.networkFulfillment.config: violates the"
+                " values schema",
+            ),
+            (
+                "Error: values don't meet the specifications of the schema(s)"
+                " in the following chart(s):\n"
+                "osac:\n- aap.instanceGroups.networkFulfillment.secret."
+                f"{self.hostname}: Invalid type\n",
+                "aap.instanceGroups.networkFulfillment.secret: violates the"
+                " values schema",
+            ),
         )
         for message, expected in cases:
             with self.subTest(expected=expected):
@@ -802,6 +878,52 @@ class InputRedactionTests(unittest.TestCase):
         )
         self.assertIn("bmf.netbox.tokenValue: Invalid type; expected string",
                       specific.stderr)
+
+    def test_schema_paths_of_open_maps_are_masked(self):
+        """Check every validating open map in the chart schemas is listed."""
+        derived = set()
+        for path in sorted((INSTALLER / "charts").glob("*/values.schema.json")):
+            schema = json.loads(path.read_text())
+            defs = schema.get("$defs", {})
+
+            def resolve(node):
+                for _ in range(10):
+                    if not (isinstance(node, dict) and "$ref" in node):
+                        break
+                    ref = node["$ref"]
+                    if not ref.startswith("#/$defs/"):
+                        break
+                    node = defs.get(ref.split("/")[-1], {})
+                return node
+
+            def walk(node, prefix):
+                node = resolve(node)
+                if not isinstance(node, dict):
+                    return
+                additional = node.get("additionalProperties")
+                # An open map that validates its unknown entries echoes the
+                # entry key in a schema error path; one that accepts any
+                # entry validates none, so no key can reach a path.
+                if isinstance(additional, dict) or node.get("patternProperties"):
+                    derived.add(".".join(prefix))
+                for key, child in (node.get("properties") or {}).items():
+                    walk(child, prefix + [key])
+                if isinstance(additional, dict):
+                    walk(additional, prefix + ["<key>"])
+                if isinstance(node.get("items"), dict):
+                    walk(node["items"], prefix + ["<item>"])
+                for keyword in ("allOf", "anyOf", "oneOf"):
+                    for child in node.get(keyword) or []:
+                        walk(child, prefix)
+
+            walk(schema, [])
+        listed = subprocess.run(
+            ["bash", "-c",
+             'source "$1"; printf "%s\\n" "${_LIB_OPEN_SCHEMA_MAPS[@]}"',
+             "bash", str(INSTALLER / "scripts/lib.sh")],
+            text=True, capture_output=True, check=True,
+        ).stdout.split()
+        self.assertEqual(sorted(derived), sorted(listed))
 
     def assert_real_schema_error_is_private(self, helm):
         """Feed a real Helm schema failure through the private gate."""
@@ -833,6 +955,37 @@ class InputRedactionTests(unittest.TestCase):
         self.assert_private(result.stdout + result.stderr)
         self.assertIn("offline chart rendering failed", result.stderr)
         self.assertIn("password: violates the values schema", result.stderr)
+        # A caller-named key in a validating open map is part of the path
+        # Helm echoes, so it must be reported as the map root instead.
+        (chart / "values.schema.json").write_text(json.dumps({
+            "type": "object",
+            "properties": {
+                "password": {"type": "integer"},
+                "metering": {"type": "object", "properties": {
+                    "serviceMonitor": {"type": "object", "properties": {
+                        "labels": {"type": "object", "additionalProperties": {
+                            "type": "string"}}}}}},
+            },
+        }))
+        values = self.directory / "schema-values.json"
+        values.write_text(json.dumps(
+            {"password": 1, "metering": {"serviceMonitor": {
+                "labels": {self.hostname: 1}}}}))
+        render = subprocess.run(
+            [helm, "template", "release", str(chart), "-f", str(values)],
+            text=True, capture_output=True,
+        )
+        self.assertNotEqual(render.returncode, 0)
+        self.assertIn(self.hostname, render.stderr)
+        result = subprocess.run(
+            ["bash", "-c", 'source "$1"; offline_render_error "$2"',
+             "bash", str(INSTALLER / "scripts/lib.sh"), render.stderr],
+            text=True, capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assert_private(result.stdout + result.stderr)
+        self.assertIn("metering.serviceMonitor.labels: violates the values"
+                      " schema", result.stderr)
 
     @unittest.skipUnless(HELM, "helm 3 is not installed")
     def test_offline_render_error_real_helm3_schema_error_is_private(self):

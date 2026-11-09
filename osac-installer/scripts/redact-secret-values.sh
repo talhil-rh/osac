@@ -104,6 +104,10 @@ function flow_close(line, depth,    i, c, quote) {
             continue
         }
         if (c == "\"" || c == "\047") { quote = c; continue }
+        # A YAML comment runs to the end of the line, so a brace inside it
+        # does not close the collection.
+        if (c == "#" && (i == 1 || substr(line, i - 1, 1) ~ /[[:space:]]/))
+            break
         if (c == "{") {
             depth++
         } else if (c == "}") {
@@ -139,6 +143,10 @@ function flow_scan(line, depth,    i, c) {
             continue
         }
         if (c == "\"" || c == "\047") { flow_quote = c; continue }
+        # A YAML comment runs to the end of the line, so a brace inside it
+        # does not close the item.
+        if (c == "#" && (i == 1 || substr(line, i - 1, 1) ~ /[[:space:]]/))
+            break
         if (c == "{") {
             depth++
         } else if (c == "}") {
