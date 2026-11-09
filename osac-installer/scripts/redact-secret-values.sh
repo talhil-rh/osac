@@ -268,10 +268,29 @@ function mask_internal_hostnames(text,    out, rest) {
     return out rest
 }
 # The host of a URL is endpoint data in a configuration-file payload, so
-# it is masked in full; the scheme and any path stay readable.
-function mask_url_hosts(text) {
-    gsub(/:\/\/[^\/[:space:]@]+/, "://<redacted>", text)
-    return text
+# it is masked in full; the scheme, any userinfo and any path stay
+# readable, and a closing quote or bracket after a host without a path is
+# left in place.
+function mask_url_hosts(text,    out, rest) {
+    out = ""
+    rest = text
+    while (match(rest, /:\/\//)) {
+        out = out substr(rest, 1, RSTART + RLENGTH - 1)
+        rest = substr(rest, RSTART + RLENGTH)
+        # Userinfo is masked by the caller before this runs; if it is still
+        # there, keep it and mask the host after it, so a URL cannot keep
+        # its host past an `@`. An `@` past the end of the authority is
+        # query data, not userinfo.
+        if (match(rest, /^[^\/[:space:]"\047?#]*@/)) {
+            out = out substr(rest, 1, RLENGTH)
+            rest = substr(rest, RLENGTH + 1)
+        }
+        # The host ends at the path, a query or fragment, whitespace, a
+        # quote, an `@`, or an already-masked placeholder.
+        if (match(rest, /^[^\/[:space:]@"\047?#<]+/))
+            rest = "<redacted>" substr(rest, RLENGTH + 1)
+    }
+    return out rest
 }
 # Credential assignments embedded anywhere in a configuration-file line
 # (`options = user=x password=y`) are masked in place, keeping the key
@@ -576,8 +595,9 @@ function redact_line(line, line_no) {
             }
             # Credentials embedded as URL userinfo are masked whatever
             # the key is, because a neutral key such as uri can still
-            # carry a password in a connection string.
-            gsub(/:\/\/[^\/[:space:]@]+@/, "://<redacted>@", file_body)
+            # carry a password in a connection string. An `@` past the
+            # end of the authority is query data, not userinfo.
+            gsub(/:\/\/[^\/[:space:]@?#]+@/, "://<redacted>@", file_body)
             # The same line can carry endpoint data the line-start rule
             # above does not see: a URL host, an internal-shaped hostname,
             # an embedded credential assignment, or a credential in a URL
@@ -800,8 +820,8 @@ function redact_line(line, line_no) {
     # Credentials embedded as URL userinfo are masked on every line,
     # whatever the key or the container, because a neutral key such as
     # uri or DATABASE_URI can still carry a password in a connection
-    # string.
-    gsub(/:\/\/[^\/[:space:]@]+@/, "://<redacted>@")
+    # string. An `@` past the end of the authority is query data.
+    gsub(/:\/\/[^\/[:space:]@?#]+@/, "://<redacted>@")
     print
 }
 /^---([[:space:]]+#.*)?[[:space:]]*$/ { separator = $0; flush_document(); print separator; next }

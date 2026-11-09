@@ -1371,6 +1371,8 @@ netbox:
           export SIGNING_KEY=${cm_file_key}
           Authorization: Bearer ${cm_file_auth}
           uri = postgres://user:${cm_file_uri}@db/app
+          conn = postgres://user:${cm_file_embedded}@${cm_file_host}.apps.example.com/app
+          quoted = "https://${cm_file_host}.apps.example.com"
           api = https://netbox.example/api/?token=${cm_file_query}&author=readable
           paged = https://netbox.example/api?page=2&limit=10
           options = user=dbuser password=${cm_file_embedded} & tls=on
@@ -1435,8 +1437,12 @@ grep -q 'export DB_PASSWORD=<redacted>' "${TMP_DIR}/dryrun-configmap-file.out" \
   || fail "dry-run-configmap-file-redaction: a prefixed assignment was not masked"
 grep -q 'Authorization: <redacted>' "${TMP_DIR}/dryrun-configmap-file.out" \
   || fail "dry-run-configmap-file-redaction: an Authorization header was not masked"
-grep -q 'postgres://<redacted>@db/app' "${TMP_DIR}/dryrun-configmap-file.out" \
+grep -q 'postgres://<redacted>@<redacted>/app' "${TMP_DIR}/dryrun-configmap-file.out" \
   || fail "dry-run-configmap-file-redaction: URL userinfo was not masked"
+grep -Fq 'conn = postgres://<redacted>@<redacted>/app' "${TMP_DIR}/dryrun-configmap-file.out" \
+  || fail "dry-run-configmap-file-redaction: a URL host after userinfo survived"
+grep -Fq 'quoted = "https://<redacted>"' "${TMP_DIR}/dryrun-configmap-file.out" \
+  || fail "dry-run-configmap-file-redaction: a quoted URL host was not masked"
 grep -Fq '?token=<redacted>&author=readable' "${TMP_DIR}/dryrun-configmap-file.out" \
   || fail "dry-run-configmap-file-redaction: a URL query credential was not masked"
 grep -Fq 'paged = https://<redacted>/api?page=2&limit=10' "${TMP_DIR}/dryrun-configmap-file.out" \

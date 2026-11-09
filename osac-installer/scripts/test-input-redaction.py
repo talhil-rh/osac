@@ -28,12 +28,14 @@ class InputRedactionTests(unittest.TestCase):
         self.password = secrets.token_hex(24)
         self.username = secrets.token_hex(8)
         self.hostname = f"{secrets.token_hex(12)}.internal.invalid"
+        self.corp_host = f"{secrets.token_hex(12)}.corp.example"
         self.url = f"https://{self.username}:{self.password}@{self.hostname}"
         self.token = secrets.token_hex(24)
 
     def assert_private(self, output):
         """Fail when any canary value appears in the given output."""
-        for value in (self.username, self.password, self.hostname, self.token):
+        for value in (self.username, self.password, self.hostname, self.token,
+                      self.corp_host):
             self.assertFalse(value in output, "sensitive canary reached output")
 
     def redact(self, manifest):
@@ -120,6 +122,12 @@ class InputRedactionTests(unittest.TestCase):
             "      readable-cert-line\n"
             f"    Authorization: Bearer {self.token}\n"
             f"    uri = postgres://user:{self.password}@db/app\n"
+            f"    conn = postgres://user:{self.password}"
+            f"@{self.corp_host}:5432/app\n"
+            f'    quoted = "https://{self.corp_host}"\n'
+            f"    single = 'https://{self.corp_host}'\n"
+            f'    quoted_path = "https://{self.corp_host}/api"\n'
+            "    dashless = https://netbox.example?page=2&limit=10\n"
             f"    api = https://netbox.example/api/?token={self.token}"
             "&author=readable\n"
             f"    endpoint = https://netbox.example/api"
@@ -162,7 +170,14 @@ class InputRedactionTests(unittest.TestCase):
         self.assertNotIn("key-material-line", result.stdout)
         self.assertIn("readable-cert-line", result.stdout)
         self.assertIn("Authorization: <redacted>", result.stdout)
-        self.assertIn("postgres://<redacted>@db/app", result.stdout)
+        self.assertIn("postgres://<redacted>@<redacted>/app", result.stdout)
+        self.assertIn("conn = postgres://<redacted>@<redacted>/app",
+                      result.stdout)
+        self.assertIn('quoted = "https://<redacted>"', result.stdout)
+        self.assertIn("single = 'https://<redacted>'", result.stdout)
+        self.assertIn('quoted_path = "https://<redacted>/api"', result.stdout)
+        self.assertIn("dashless = https://<redacted>?page=2&limit=10",
+                      result.stdout)
         self.assertIn("?token=<redacted>&author=readable", result.stdout)
         self.assertIn("endpoint = <redacted>", result.stdout)
         self.assertIn("user=dbuser password=<redacted> & tls=on", result.stdout)
