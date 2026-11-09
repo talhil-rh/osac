@@ -1344,6 +1344,7 @@ cm_file_key="configmap-file-key-$(date +%s)-$$"
 cm_file_auth="configmap-file-auth-$(date +%s)-$$"
 cm_file_uri="configmap-file-uri-$(date +%s)-$$"
 cm_file_json="configmap-file-json-$(date +%s)-$$"
+cm_file_json_escaped="configmap-file-json-escaped-$(date +%s)-$$"
 cm_file_nested="configmap-file-nested-$(date +%s)-$$"
 cat >"${TMP_DIR}/dryrun-configmap-file.yaml" <<CM_FILE_EOF
 netbox:
@@ -1365,6 +1366,7 @@ netbox:
           Authorization: Bearer ${cm_file_auth}
           uri = postgres://user:${cm_file_uri}@db/app
           {"password":"${cm_file_json}"}
+          {"token":"pre\"${cm_file_json_escaped}\\\\tail"}
           private_key: |
             key-material-line
             ${cm_file_nested}
@@ -1378,7 +1380,7 @@ if ! make -C "${INSTALLER_DIR}" --no-print-directory \
     PLATFORM=openshift PROFILE=bmaas-netbox-ci NS=osac \
     DRY_RUN_OCP_VERSION=4.22 DRY_RUN_CLUSTER_DOMAIN=apps.example.com \
     "INFRA_VALUES_EXTRA=-f values/bmaas-netbox-ci/infra.yaml -f ${TMP_DIR}/dryrun-configmap-file.yaml" \
-    EXTRA_HELM_ARGS=--set=bmf.netbox.tokenValue=offline-placeholder \
+    EXTRA_HELM_ARGS=--set=bmf.netbox.tokenValue=${offline_token} \
     >"${TMP_DIR}/dryrun-configmap-file.out" \
     2>"${TMP_DIR}/dryrun-configmap-file.err"; then
   fail "dry-run-configmap-file-redaction: the dry run failed"
@@ -1395,6 +1397,8 @@ grep -Fq "${cm_file_uri}" "${TMP_DIR}/dryrun-configmap-file.out" \
   && fail "dry-run-configmap-file-redaction: URL userinfo survived"
 grep -Fq "${cm_file_json}" "${TMP_DIR}/dryrun-configmap-file.out" \
   && fail "dry-run-configmap-file-redaction: an inline JSON value survived"
+grep -Fq "${cm_file_json_escaped}" "${TMP_DIR}/dryrun-configmap-file.out" \
+  && fail "dry-run-configmap-file-redaction: an escaped JSON value survived"
 grep -Fq "${cm_file_nested}" "${TMP_DIR}/dryrun-configmap-file.out" \
   && fail "dry-run-configmap-file-redaction: a nested block scalar survived"
 grep -Fq 'key-material-line' "${TMP_DIR}/dryrun-configmap-file.out" \
@@ -1411,6 +1415,8 @@ grep -q 'postgres://<redacted>@db/app' "${TMP_DIR}/dryrun-configmap-file.out" \
   || fail "dry-run-configmap-file-redaction: URL userinfo was not masked"
 grep -q '{"password":"<redacted>"}' "${TMP_DIR}/dryrun-configmap-file.out" \
   || fail "dry-run-configmap-file-redaction: an inline JSON field was not masked"
+grep -q '{"token":"<redacted>"}' "${TMP_DIR}/dryrun-configmap-file.out" \
+  || fail "dry-run-configmap-file-redaction: an escaped JSON field was not masked"
 grep -q 'private_key: <redacted>' "${TMP_DIR}/dryrun-configmap-file.out" \
   || fail "dry-run-configmap-file-redaction: a nested block key was not masked"
 grep -q 'readable-cert-line' "${TMP_DIR}/dryrun-configmap-file.out" \

@@ -153,7 +153,11 @@ function credential_file_key(name,    lower) {
 function mask_json_credentials(line,    out, rest, obj, key, val) {
     out = ""
     rest = line
-    while (match(rest, /"[A-Za-z0-9_.-]+"[[:space:]]*:[[:space:]]*"[^"]*"/)) {
+    # JSON string values may contain escaped quotes and backslashes, so the
+    # value pattern consumes an escape pair before it can end the string;
+    # otherwise a `\"` inside a credential would cut the match short and
+    # print the rest of the value.
+    while (match(rest, /"[A-Za-z0-9_.-]+"[[:space:]]*:[[:space:]]*"(\\.|[^"])*"/)) {
         obj = substr(rest, RSTART, RLENGTH)
         key = obj
         sub(/^"/, "", key)
@@ -499,12 +503,18 @@ function redact_line(line, line_no) {
     # the item is block- or flow-style. A block-scalar value keeps its
     # body on deeper-indented lines, which are dropped with the value.
     if (env_secret[line_no]) {
-        if ($0 ~ /^[[:space:]]*- \{[^}]*value:/) {
+        if ($0 ~ /^[[:space:]]*- \{/) {
             # Flow item: keep the closing brace and any fields after the
-            # value, and mask only the value scalar (quoted or plain).
-            sub(/value:[[:space:]]*("[^"]*"|\047[^\047]*\047|[^,}]*)/, "value: <redacted>")
-        } else if ($0 ~ /value: /) {
-            if ($0 ~ /value: [|>]/) {
+            # value, and mask only the value scalar (quoted or plain). The
+            # key needs a flow-key boundary so a sibling field such as
+            # `subvalue:` cannot shadow the real value; the opening brace
+            # of the item counts as a boundary for a value key written
+            # first.
+            if (match($0, /[{,[:space:]]value:[[:space:]]*("[^"]*"|\047[^\047]*\047|[^,}]*)/)) {
+                $0 = substr($0, 1, RSTART) "value: <redacted>" substr($0, RSTART + RLENGTH)
+            }
+        } else if ($0 ~ /^[[:space:]]*(- )?value: /) {
+            if ($0 ~ /^[[:space:]]*(- )?value: [|>]/) {
                 match($0, /^ */)
                 env_block_indent = RLENGTH
                 env_block = 1
