@@ -433,6 +433,46 @@ class InputRedactionTests(unittest.TestCase):
             result.stderr,
         )
 
+    def test_offline_render_error_uses_first_error_line_only(self):
+        """Check only the first Helm error line can name a location."""
+        location = (
+            "template check failed in "
+            "osac/templates/validate-values.yaml:9:1 (message suppressed)"
+        )
+        for prefix in ("", "WARNING: This chart is deprecated\n"):
+            with self.subTest(prefix=prefix):
+                message = (
+                    prefix
+                    + "Error: execution error at "
+                    "(osac/templates/validate-values.yaml:9:1): rejected\n"
+                    f"Error: execution error at ({self.hostname}:3:4): "
+                    f"{self.token}\n"
+                )
+                result = subprocess.run(
+                    ["bash", "-c", 'source "$1"; offline_render_error "$2"',
+                     "bash", str(INSTALLER / "scripts/lib.sh"), message],
+                    text=True, capture_output=True,
+                )
+                self.assertEqual(result.returncode, 0)
+                self.assert_private(result.stdout + result.stderr)
+                self.assertIn(location, result.stderr)
+                self.assertEqual(
+                    result.stderr.count("template check failed in"), 1)
+        message = (
+            "Error: values don't meet the specifications of the schema(s)"
+            " in the following chart(s):\n"
+            f"osac:\n- at '/global/x': {self.hostname}\n"
+            f"Error: execution error at ({self.hostname}:1:2): {self.token}\n"
+        )
+        result = subprocess.run(
+            ["bash", "-c", 'source "$1"; offline_render_error "$2"',
+             "bash", str(INSTALLER / "scripts/lib.sh"), message],
+            text=True, capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assert_private(result.stdout + result.stderr)
+        self.assertNotIn("template check failed in", result.stderr)
+
     def test_make_gate_infra_error_is_private(self):
         """Check a failing infra render stays private through the make gate."""
         binary = self.directory / "bin"

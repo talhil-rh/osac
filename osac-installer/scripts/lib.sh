@@ -179,19 +179,23 @@ offline_render_error() {
             # (CHART/templates/FILE:L:C): <message>", where the message
             # can embed the value; only the chart-relative location is
             # printed, and it is a static chart path, not customer data.
-            # The matcher is anchored to the start of Helm's own error
-            # line, so a path-shaped token that a tpl value places in the
-            # message text (for example by nesting another "execution
-            # error at" phrase) is never printed as a location.
-            # Errors without a recognizable path still get the generic
-            # line alone. The fabricDomainInventory entry key is
-            # customer-supplied (a hostname) and can itself appear in the
-            # path, so that path is printed without the entry key.
+            # The location is read from the first "Error: " line only: a
+            # tpl fail/required message can hold a newline followed by a
+            # fake "Error: execution error at (value:1:1):" line, and
+            # scanning every line would print that text as a location.
+            # Helm prints chart warnings before the error, so the scan
+            # starts at the first error line instead of the first line of
+            # output. A first error that is not a template failure prints
+            # no location and keeps the generic line alone.
+            # The fabricDomainInventory entry key is customer-supplied (a
+            # hostname) and can itself appear in the path, so that path is
+            # printed without the entry key.
             printf '%s\n' "$1" | LC_ALL=C sed -nE \
                 -e "s|^- at '/operator/fabricDomainInventory/[^']*'.*|operator.fabricDomainInventory: violates the values schema|p" \
                 -e 's/^- operator\.fabricDomainInventory\.[^:]*: .*/operator.fabricDomainInventory: violates the values schema/p' \
                 -e "s|^- at '([A-Za-z0-9_/.~-]*)'.*|\1: violates the values schema|p" \
-                -e 's/^- ([A-Za-z0-9_.()-]+): .*/\1: violates the values schema/p' \
+                -e 's/^- ([A-Za-z0-9_.()-]+): .*/\1: violates the values schema/p' >&2
+            printf '%s\n' "$1" | LC_ALL=C sed -nE '/^Error: /{p;q;}' | LC_ALL=C sed -nE \
                 -e 's|^Error: execution error at \(([A-Za-z0-9_./-]+:[0-9]+:[0-9]+)\):.*|template check failed in \1 (message suppressed)|p' >&2 ;;
     esac
 }
