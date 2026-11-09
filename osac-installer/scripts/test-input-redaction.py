@@ -413,6 +413,26 @@ class InputRedactionTests(unittest.TestCase):
             result.stderr,
         )
 
+    def test_offline_render_error_ignores_embedded_location(self):
+        """Check a path-shaped token in the message is never printed."""
+        message = (
+            "Error: execution error at "
+            "(osac/templates/validate-values.yaml:9:1): rejected "
+            f"execution error at ({self.hostname}:3:4): {self.token}\n"
+        )
+        result = subprocess.run(
+            ["bash", "-c", 'source "$1"; offline_render_error "$2"',
+             "bash", str(INSTALLER / "scripts/lib.sh"), message],
+            text=True, capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assert_private(result.stdout + result.stderr)
+        self.assertIn(
+            "template check failed in "
+            "osac/templates/validate-values.yaml:9:1 (message suppressed)",
+            result.stderr,
+        )
+
     def test_make_gate_infra_error_is_private(self):
         """Check a failing infra render stays private through the make gate."""
         binary = self.directory / "bin"

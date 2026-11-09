@@ -179,6 +179,10 @@ offline_render_error() {
             # (CHART/templates/FILE:L:C): <message>", where the message
             # can embed the value; only the chart-relative location is
             # printed, and it is a static chart path, not customer data.
+            # The matcher is anchored to the start of Helm's own error
+            # line, so a path-shaped token that a tpl value places in the
+            # message text (for example by nesting another "execution
+            # error at" phrase) is never printed as a location.
             # Errors without a recognizable path still get the generic
             # line alone. The fabricDomainInventory entry key is
             # customer-supplied (a hostname) and can itself appear in the
@@ -188,7 +192,7 @@ offline_render_error() {
                 -e 's/^- operator\.fabricDomainInventory\.[^:]*: .*/operator.fabricDomainInventory: violates the values schema/p' \
                 -e "s|^- at '([A-Za-z0-9_/.~-]*)'.*|\1: violates the values schema|p" \
                 -e 's/^- ([A-Za-z0-9_.()-]+): .*/\1: violates the values schema/p' \
-                -e 's|.*execution error at \(([A-Za-z0-9_./-]+:[0-9]+:[0-9]+)\):.*|template check failed in \1 (message suppressed)|p' >&2 ;;
+                -e 's|^Error: execution error at \(([A-Za-z0-9_./-]+:[0-9]+:[0-9]+)\):.*|template check failed in \1 (message suppressed)|p' >&2 ;;
     esac
 }
 
