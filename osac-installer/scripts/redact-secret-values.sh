@@ -133,6 +133,29 @@ function credential_file_key(name,    lower) {
         || lower ~ /[_-]key$/ \
         || name ~ /[a-z0-9]Key$/
 }
+# Masks credential values in an inline JSON object on one line, keeping
+# the key and the rest of the line readable. Only quoted string values
+# are considered, and a line without such fields passes through.
+function mask_json_credentials(line,    out, rest, obj, key, val) {
+    out = ""
+    rest = line
+    while (match(rest, /"[A-Za-z0-9_.-]+"[[:space:]]*:[[:space:]]*"[^"]*"/)) {
+        obj = substr(rest, RSTART, RLENGTH)
+        key = obj
+        sub(/^"/, "", key)
+        sub(/".*/, "", key)
+        out = out substr(rest, 1, RSTART - 1)
+        if (credential_file_key(key)) {
+            val = obj
+            sub(/^[^:]*:[[:space:]]*/, "", val)
+            out = out substr(obj, 1, length(obj) - length(val)) "\"<redacted>\""
+        } else {
+            out = out obj
+        }
+        rest = substr(rest, RSTART + RLENGTH)
+    }
+    return out rest
+}
 # Indent of the key text on a line, counting a list-item dash as
 # structure so `- resources:` and `  resources:` compare as siblings.
 function key_indent(line,    indent) {
@@ -328,6 +351,13 @@ function redact_line(line, line_no) {
                     }
                 }
             }
+            # Credentials embedded as URL userinfo are masked whatever
+            # the key is, because a neutral key such as uri can still
+            # carry a password in a connection string.
+            gsub(/:\/\/[^\/[:space:]@]+@/, "://<redacted>@", file_body)
+            # An inline JSON object line has no leading key for the rule
+            # above; its credential-shaped fields are masked in place.
+            file_body = mask_json_credentials(file_body)
             print file_prefix file_body
             return
         }

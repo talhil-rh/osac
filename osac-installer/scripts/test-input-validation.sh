@@ -1338,6 +1338,8 @@ cm_file_password="configmap-file-password-$(date +%s)-$$"
 cm_file_token="configmap-file-token-$(date +%s)-$$"
 cm_file_key="configmap-file-key-$(date +%s)-$$"
 cm_file_auth="configmap-file-auth-$(date +%s)-$$"
+cm_file_uri="configmap-file-uri-$(date +%s)-$$"
+cm_file_json="configmap-file-json-$(date +%s)-$$"
 cat >"${TMP_DIR}/dryrun-configmap-file.yaml" <<CM_FILE_EOF
 netbox:
   extraDeploy:
@@ -1356,6 +1358,8 @@ netbox:
           encryption_key: ${cm_file_key}
           export SIGNING_KEY=${cm_file_key}
           Authorization: Bearer ${cm_file_auth}
+          uri = postgres://user:${cm_file_uri}@db/app
+          {"password":"${cm_file_json}"}
           author = readable
 CM_FILE_EOF
 if ! make -C "${INSTALLER_DIR}" --no-print-directory \
@@ -1377,6 +1381,10 @@ grep -Fq "${cm_file_key}" "${TMP_DIR}/dryrun-configmap-file.out" \
   && fail "dry-run-configmap-file-redaction: a KEY-suffixed value survived"
 grep -Fq "${cm_file_auth}" "${TMP_DIR}/dryrun-configmap-file.out" \
   && fail "dry-run-configmap-file-redaction: an Authorization value survived"
+grep -Fq "${cm_file_uri}" "${TMP_DIR}/dryrun-configmap-file.out" \
+  && fail "dry-run-configmap-file-redaction: URL userinfo survived"
+grep -Fq "${cm_file_json}" "${TMP_DIR}/dryrun-configmap-file.out" \
+  && fail "dry-run-configmap-file-redaction: an inline JSON value survived"
 grep -q 'name: netbox-file-config' "${TMP_DIR}/dryrun-configmap-file.out" \
   || fail "dry-run-configmap-file-redaction: the overlay ConfigMap is missing"
 grep -q 'password = <redacted>' "${TMP_DIR}/dryrun-configmap-file.out" \
@@ -1385,6 +1393,10 @@ grep -q 'export DB_PASSWORD=<redacted>' "${TMP_DIR}/dryrun-configmap-file.out" \
   || fail "dry-run-configmap-file-redaction: a prefixed assignment was not masked"
 grep -q 'Authorization: <redacted>' "${TMP_DIR}/dryrun-configmap-file.out" \
   || fail "dry-run-configmap-file-redaction: an Authorization header was not masked"
+grep -q 'postgres://<redacted>@db/app' "${TMP_DIR}/dryrun-configmap-file.out" \
+  || fail "dry-run-configmap-file-redaction: URL userinfo was not masked"
+grep -q '{"password":"<redacted>"}' "${TMP_DIR}/dryrun-configmap-file.out" \
+  || fail "dry-run-configmap-file-redaction: an inline JSON field was not masked"
 grep -q 'author = readable' "${TMP_DIR}/dryrun-configmap-file.out" \
   || fail "dry-run-configmap-file-redaction: a non-credential line was masked"
 

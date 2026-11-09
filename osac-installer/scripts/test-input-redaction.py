@@ -111,6 +111,8 @@ class InputRedactionTests(unittest.TestCase):
             f"    export SIGNING_KEY={self.token}\n"
             f"    signingKey: {self.token}\n"
             f"    Authorization: Bearer {self.token}\n"
+            f"    uri = postgres://user:{self.password}@db/app\n"
+            f'    {{"password":"{self.token}"}}\n'
             "    key: readable-key\n"
             "    tls.key: /etc/tls/tls.key\n"
             "    author = readable\n"
@@ -140,6 +142,8 @@ class InputRedactionTests(unittest.TestCase):
         self.assertIn("export SIGNING_KEY=<redacted>", result.stdout)
         self.assertIn("signingKey: <redacted>", result.stdout)
         self.assertIn("Authorization: <redacted>", result.stdout)
+        self.assertIn("postgres://<redacted>@db/app", result.stdout)
+        self.assertIn('{"password":"<redacted>"}', result.stdout)
         for readable in ("host = netbox-db", "author = readable", "ttl = 300",
                          "oauth: oidc", "log_level=debug",
                          "key: readable-key", "tls.key: /etc/tls/tls.key"):
