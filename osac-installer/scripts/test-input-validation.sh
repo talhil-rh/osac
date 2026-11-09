@@ -1578,6 +1578,22 @@ helm template osac-infra "${INFRA_CHART_DIR}" \
   | grep 'rollout/extra-env' >/dev/null \
   && fail "keycloak-extra-env-rollout: the rollout annotation appears without extraEnv"
 
+# extraEnv values are stringified before the shared entry list is encoded
+# as JSON: the consumer decodes with fromJsonArray, which turns every JSON
+# number into a float64, so a large integer set through --set (an int64)
+# would lose precision and reach the Secret as an approximation.
+echo "checking keycloak-extra-env-numeric (large integers keep their digits)"
+if ! helm template osac-infra "${INFRA_CHART_DIR}" \
+    --namespace osac-infra \
+    --values "${INSTALLER_DIR}/values/vmaas-ci/infra.yaml" \
+    --set 'keycloak.extraEnv[0].name=KC_NUMERIC' \
+    --set 'keycloak.extraEnv[0].value=9007199254740993' \
+    2>"${netbox_gate_err}" >"${TMP_DIR}/dryrun-env-numeric.yaml"; then
+  fail "keycloak-extra-env-numeric: the osac-infra chart render failed"
+fi
+grep -Fq 'extra-env-0: "9007199254740993"' "${TMP_DIR}/dryrun-env-numeric.yaml" \
+  || fail "keycloak-extra-env-numeric: a large integer lost precision on the JSON round trip"
+
 # Internal endpoint URLs reach the dry run as plain env values too (for
 # example the dev-fixtures Job's MCP_RESOURCE_URL): endpoint-shaped env
 # names are masked like credential-shaped ones.

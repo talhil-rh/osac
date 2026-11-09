@@ -36,6 +36,10 @@ rendered). The keycloak-extra-env Secret and the Deployment's secretKeyRefs
 must iterate the same entries in the same order, so both ranges include this
 helper: it normalizes either shape to one list -- map entries in key order,
 which Go templates sort deterministically -- and returns it as JSON.
+Numeric values are stringified first: the consumer decodes the JSON back with
+fromJsonArray, which turns every JSON number into a float64, so a large
+integer supplied through --set (an int64) would lose precision on the round
+trip. Missing and null values are left untouched.
 */}}
 {{- define "osac-infra.keycloakExtraEnvEntries" -}}
 {{- $entries := .Values.keycloak.extraEnv -}}
@@ -46,7 +50,21 @@ which Go templates sort deterministically -- and returns it as JSON.
 {{- end -}}
 {{- $entries = $list -}}
 {{- end -}}
-{{- toJson $entries -}}
+{{- $normalized := list -}}
+{{- range $entry := $entries -}}
+{{- if kindIs "map" $entry -}}
+{{- if hasKey $entry "value" -}}
+{{- $value := $entry.value -}}
+{{- range $kind := list "int" "int8" "int16" "int32" "int64" "uint" "uint8" "uint16" "uint32" "uint64" "float32" "float64" -}}
+{{- if kindIs $kind $value -}}
+{{- $entry = set (deepCopy $entry) "value" (toString $value) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- $normalized = append $normalized $entry -}}
+{{- end -}}
+{{- toJson $normalized -}}
 {{- end -}}
 
 {{/*
