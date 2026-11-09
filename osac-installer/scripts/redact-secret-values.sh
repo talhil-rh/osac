@@ -254,8 +254,9 @@ function mark_env_secret_values(    i, j, end, ind, key_ind, name, sensitive) {
     for (i = 1; i <= document_length; i++) {
         if (document[i] !~ /^[[:space:]]*- [^ ].*:/) continue
         if (document[i] ~ /^[[:space:]]*- \{/) {
-            if (!match(document[i], /name:[[:space:]]*("[^"]*"|\047[^\047]*\047|[^,}]*)/)) continue
-            name = substr(document[i], RSTART + 5, RLENGTH - 5)
+            if (!match(document[i], /(^|[{,[:space:]])name:[[:space:]]*("[^"]*"|\047[^\047]*\047|[^,}]*)/)) continue
+            name = substr(document[i], RSTART, RLENGTH)
+            sub(/^.*name:[[:space:]]*/, "", name)
             gsub(/["\047]/, "", name)
             sub(/^[[:space:]]+/, "", name)
             sub(/[[:space:]]+$/, "", name)

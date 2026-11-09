@@ -232,6 +232,7 @@ class InputRedactionTests(unittest.TestCase):
             "spec:\n  containers:\n    - name: app\n      env:\n"
             f"        - value: {self.token}\n          name: DB_PASSWORD\n"
             f"        - {{name: API_TOKEN, value: {self.token}}}\n"
+            f"        - {{username: plain, name: API_TOKEN, value: {self.token}}}\n"
             "        - {name: PLAIN_SETTING, value: readable-flow}\n"
             f"        - name: BIND_PASSWORD\n          value: {self.token}\n"
         )
@@ -240,7 +241,7 @@ class InputRedactionTests(unittest.TestCase):
             input=manifest, text=True, capture_output=True, check=True,
         )
         self.assert_private(result.stdout + result.stderr)
-        self.assertEqual(result.stdout.count("value: <redacted>"), 3)
+        self.assertEqual(result.stdout.count("value: <redacted>"), 4)
         self.assertIn(
             "{name: PLAIN_SETTING, value: readable-flow}", result.stdout
         )
