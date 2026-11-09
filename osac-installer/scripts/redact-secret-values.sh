@@ -46,8 +46,9 @@
 # Block-scalar bodies of masked env values and masked ConfigMap values
 # are dropped with their value line; a block-scalar ConfigMap value under
 # any other key is a configuration-file payload, and a credential
-# assignment inside it (`password: x`, `token = x`, `"client_secret": x`)
-# is masked in place so the rest of the file stays readable. Resource
+# assignment inside it (`password: x`, `token = x`, `"client_secret": x`,
+# also behind an `export ` or `- ` prefix) is masked in place so the rest
+# of the file stays readable. Resource
 # structure, Secret/ConfigMap names and keys, and every other value stay
 # readable so the dry run remains useful for review.
 set -euo pipefail
@@ -84,13 +85,14 @@ function mask_flow_list(line,    head, body, n, i, out) {
     return head out "]"
 }
 # True when a data key or env variable name is credential-shaped: the
-# secret-bearing words, any *_KEY-suffixed name (SIGNING_KEY,
-# ENCRYPTION_KEY), and DSN/connection-string names, which often embed a
-# password.
+# secret-bearing words, any KEY-suffixed name (SIGNING_KEY, ENCRYPTION_KEY,
+# and the camelCase signingKey this chart family also uses), and
+# DSN/connection-string names, which often embed a password.
 function credential_name(name,    lower) {
     lower = tolower(name)
     return lower ~ /(password|passwd|passphrase|secret|token|credential|api_key|private_key|access_key|auth|session|dsn|conn(ection)?_?str)/ \
-        || lower ~ /(^|_)key$/
+        || lower ~ /(^|_)key$/ \
+        || name ~ /[a-z0-9]Key$/
 }
 # True when a key inside a configuration-file payload is credential-shaped.
 # Tighter than credential_name(): file content is prose-like, so the
@@ -242,20 +244,37 @@ function redact_line(line, line_no) {
             config_file_block = 0
         } else {
             file_line = $0
-            if (file_line ~ /^[[:space:]]*["\047]?[A-Za-z0-9_.-]+["\047]?[[:space:]]*[:=][[:space:]]*[^[:space:]]/) {
-                file_key = file_line
-                sub(/^[[:space:]]*["\047]?/, "", file_key)
+            file_prefix = ""
+            file_body = file_line
+            # Shell scripts and YAML lists put a prefix before the
+            # assignment (`export DB_PASSWORD=x`, `- password: x`). Strip
+            # indentation and any such prefix while matching the key, and
+            # keep them in the printed line.
+            while (file_body != "") {
+                if (file_body ~ /^[[:space:]]+/) {
+                    match(file_body, /^[[:space:]]+/)
+                } else if (file_body ~ /^(-|export)[[:space:]]+/) {
+                    match(file_body, /^(-|export)[[:space:]]+/)
+                } else {
+                    break
+                }
+                file_prefix = file_prefix substr(file_body, 1, RLENGTH)
+                file_body = substr(file_body, RLENGTH + 1)
+            }
+            if (file_body ~ /^["\047]?[A-Za-z0-9_.-]+["\047]?[[:space:]]*[:=][[:space:]]*[^[:space:]]/) {
+                file_key = file_body
+                sub(/^["\047]?/, "", file_key)
                 sub(/["\047]?[[:space:]]*[:=][[:space:]]*.*$/, "", file_key)
                 if (credential_file_key(file_key)) {
                     # Keep everything through the separator and any spacing
                     # after it, so `password: x`, `password=x` and
                     # `"token": "x"` all keep their shape.
-                    if (match(file_line, /[:=][[:space:]]*/)) {
-                        file_line = substr(file_line, 1, RSTART + RLENGTH - 1) "<redacted>"
+                    if (match(file_body, /[:=][[:space:]]*/)) {
+                        file_body = substr(file_body, 1, RSTART + RLENGTH - 1) "<redacted>"
                     }
                 }
             }
-            print file_line
+            print file_prefix file_body
             return
         }
     }
@@ -419,6 +438,8 @@ function redact_line(line, line_no) {
     if (configmap_data && $0 ~ /^  [^ :][^:]*: ./) {
         config_key = $0
         sub(/:.*/, "", config_key)
+        # Drop the entry indent so a bare `key` entry matches `(^|_)key$`.
+        sub(/^[[:space:]]+/, "", config_key)
         if (credential_name(config_key)) {
             if ($0 ~ /: [|>]/) {
                 match($0, /^ */)

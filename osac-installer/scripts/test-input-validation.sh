@@ -1335,6 +1335,8 @@ netbox:
           host = netbox-db
           password = ${cm_file_password}
           token = ${cm_file_token}
+          export DB_PASSWORD=${cm_file_password}
+          - token: ${cm_file_token}
           author = readable
 CM_FILE_EOF
 if ! make -C "${INSTALLER_DIR}" --no-print-directory \
@@ -1356,6 +1358,8 @@ grep -q 'name: netbox-file-config' "${TMP_DIR}/dryrun-configmap-file.out" \
   || fail "dry-run-configmap-file-redaction: the overlay ConfigMap is missing"
 grep -q 'password = <redacted>' "${TMP_DIR}/dryrun-configmap-file.out" \
   || fail "dry-run-configmap-file-redaction: the file password was not masked"
+grep -q 'export DB_PASSWORD=<redacted>' "${TMP_DIR}/dryrun-configmap-file.out" \
+  || fail "dry-run-configmap-file-redaction: a prefixed assignment was not masked"
 grep -q 'author = readable' "${TMP_DIR}/dryrun-configmap-file.out" \
   || fail "dry-run-configmap-file-redaction: a non-credential line was masked"
 

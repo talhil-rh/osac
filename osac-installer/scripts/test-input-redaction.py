@@ -74,6 +74,8 @@ class InputRedactionTests(unittest.TestCase):
             f"data:\n  apiToken: |\n    {self.token}\n"
             f"  adminPassword: {self.password}\n"
             f"  SECRET_KEY: {self.password}\n"
+            f"  signingKey: {self.token}\n"
+            f"  key: {self.token}\n"
             "  plainValue: readable\n"
             "---\n"
             "data:\n"
@@ -89,6 +91,8 @@ class InputRedactionTests(unittest.TestCase):
         self.assertIn("apiToken: <redacted>", result.stdout)
         self.assertIn("adminPassword: <redacted>", result.stdout)
         self.assertIn("SECRET_KEY: <redacted>", result.stdout)
+        self.assertIn("signingKey: <redacted>", result.stdout)
+        self.assertIn("\n  key: <redacted>\n", result.stdout)
         self.assertEqual(result.stdout.count("plainValue: readable"), 2)
         self.assertNotIn("apiToken: |", result.stdout)
 
@@ -101,6 +105,8 @@ class InputRedactionTests(unittest.TestCase):
             "    host = netbox-db\n"
             f"    password = {self.password}\n"
             f"    token = {self.token}\n"
+            f"    export DB_PASSWORD={self.password}\n"
+            f"    - token: {self.token}\n"
             "    author = readable\n"
             "    ttl = 300\n"
             "  settings.yaml: |\n"
@@ -122,6 +128,8 @@ class InputRedactionTests(unittest.TestCase):
         self.assertIn("token = <redacted>", result.stdout)
         self.assertIn('"client_secret": <redacted>', result.stdout)
         self.assertIn("db_password=<redacted>", result.stdout)
+        self.assertIn("export DB_PASSWORD=<redacted>", result.stdout)
+        self.assertIn("- token: <redacted>", result.stdout)
         for readable in ("host = netbox-db", "author = readable", "ttl = 300",
                          "oauth: oidc", "log_level=debug"):
             self.assertIn(readable, result.stdout)
