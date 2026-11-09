@@ -1438,7 +1438,9 @@ grep -q 'value: foreground' "${TMP_DIR}/dryrun-env-keynames.yaml" \
 # RBAC rules that target Secrets name the Secret in resourceNames, and the
 # name is customer-supplied (netbox.apiTokenSecret carries internal
 # hostnames): Secret-scoped resourceNames are masked in both list forms,
-# while resourceNames of other kinds stay readable for RBAC review.
+# while resourceNames of other kinds stay readable for RBAC review. A rule
+# supplied through netbox.extraDeploy can order its keys freely, so the
+# Secret scope must not depend on resources appearing first.
 echo "checking dry-run-role-redaction (Secret resourceNames stay out)"
 printf '%s\n' 'kind: Role' 'rules:' '- apiGroups: [""]' \
   '  resources: ["secrets"]' \
@@ -1447,8 +1449,15 @@ printf '%s\n' 'kind: Role' 'rules:' '- apiGroups: [""]' \
   '  resourceNames:' '  - token.netbox.internal.example.com' \
   '  verbs:' '  - get' '- apiGroups:' '  - ""' '  resources:' '  - configmaps' \
   '  resourceNames:' '  - hub-access' '  verbs:' '  - get' \
+  '- resourceNames: ["ordered-flow.internal.example.com"]' \
+  '  resources: ["secrets"]' '  verbs: ["get"]' \
+  '- resourceNames:' '  - ordered-block.internal.example.com' \
+  '  resources:' '  - secrets' '  verbs:' '  - get' \
+  '- resourceNames: ["ordered-visible"]' '  resources: ["configmaps"]' \
+  '  verbs: ["get"]' \
   | "${SCRIPT_DIR}/redact-secret-values.sh" >"${TMP_DIR}/dryrun-role-direct.yaml"
-for leaked in 'netbox.internal.example.com' 'token.netbox.internal.example.com'; do
+for leaked in 'netbox.internal.example.com' 'token.netbox.internal.example.com' \
+  'ordered-flow.internal.example.com' 'ordered-block.internal.example.com'; do
   grep -Fq "${leaked}" "${TMP_DIR}/dryrun-role-direct.yaml" \
     && fail "dry-run-role-redaction: a Secret resourceName was kept (${leaked})"
 done
@@ -1458,6 +1467,8 @@ grep -Fq '  - <redacted>' "${TMP_DIR}/dryrun-role-direct.yaml" \
   || fail "dry-run-role-redaction: a block-list Secret resourceName was not masked"
 grep -Fq '  - hub-access' "${TMP_DIR}/dryrun-role-direct.yaml" \
   || fail "dry-run-role-redaction: a non-Secret resourceName was masked"
+grep -Fq 'resourceNames: ["ordered-visible"]' "${TMP_DIR}/dryrun-role-direct.yaml" \
+  || fail "dry-run-role-redaction: an ordered non-Secret resourceName was masked"
 
 # The same rule through the chart path: the netbox-token-seed hook Role is
 # the one dry-run document that names a caller-set Secret, so an internal
@@ -1474,10 +1485,11 @@ helm template osac-infra "${INFRA_CHART_DIR}" \
 grep -Fq 'netbox.internal.example.com' "${TMP_DIR}/dryrun-role-render.yaml" \
   && fail "dry-run-role-render-redaction: the seed Role Secret name reached the dry run"
 
-# Certificate dnsNames and commonName, Route hosts, and Gateway API route
-# hostnames carry the caller-supplied keycloak route hostname and cluster
-# domain, and caller-supplied internal hostnames cannot be told apart
-# from chart-internal ones by shape, so every entry is masked -- including
+# Certificate dnsNames and commonName, Route hosts, the hostname lists of
+# Gateway API routes, and each Gateway listener's singular hostname carry
+# the caller-supplied keycloak route hostname and cluster domain, and
+# caller-supplied internal hostnames cannot be told apart from
+# chart-internal ones by shape, so every entry is masked -- including
 # two-label service.namespace names and .svc/.cluster.local names. Helm
 # renders template comments inside these lists, so the list reader must
 # skip them without ending the list.
@@ -1495,10 +1507,13 @@ printf '%s\n' 'kind: Certificate' 'spec:' \
   '    # comment inside the list' \
   '    - keycloak-keycloak.apps.internal.example.com' \
   '  rules: []' \
+  'kind: Gateway' 'spec:' '  listeners:' '  - name: https' \
+  '    hostname: gateway.internal.example.com' \
   | "${SCRIPT_DIR}/redact-secret-values.sh" >"${TMP_DIR}/dryrun-hostnames.yaml"
 for leaked in 'keycloak-keycloak.apps.internal.example.com' \
   'mgt.hub.internal.example.com' 'openbao.c3i' \
-  'keycloak.keycloak.svc.cluster.local' 'osac-kafka.osac-kafka.svc'; do
+  'keycloak.keycloak.svc.cluster.local' 'osac-kafka.osac-kafka.svc' \
+  'gateway.internal.example.com'; do
   grep -Fq "${leaked}" "${TMP_DIR}/dryrun-hostnames.yaml" \
     && fail "dry-run-hostname-redaction: a hostname was kept (${leaked})"
 done
@@ -1506,6 +1521,8 @@ grep -Fq 'commonName: <redacted>' "${TMP_DIR}/dryrun-hostnames.yaml" \
   || fail "dry-run-hostname-redaction: the commonName was not masked"
 grep -Fq 'host: <redacted>' "${TMP_DIR}/dryrun-hostnames.yaml" \
   || fail "dry-run-hostname-redaction: the Route host was not masked"
+grep -Fq 'hostname: <redacted>' "${TMP_DIR}/dryrun-hostnames.yaml" \
+  || fail "dry-run-hostname-redaction: the Gateway listener hostname was not masked"
 grep -Fq 'dnsNames: [<redacted>, <redacted>]' "${TMP_DIR}/dryrun-hostnames.yaml" \
   || fail "dry-run-hostname-redaction: a flow-list entry was not masked"
 grep -Fq '  - <redacted>' "${TMP_DIR}/dryrun-hostnames.yaml" \
@@ -1642,6 +1659,47 @@ grep -A1 'name: INTERNAL_PORT' "${TMP_DIR}/dryrun-devstack-svc-rendered.yaml" \
   | grep -q 'value: "8001"' \
   || fail "dry-run-internal-svc-redaction: the service port entry was masked or lost"
 
+# The devstack UI ConfigMap carries the fulfillment API and OIDC issuer
+# endpoints as plain data entries, and the provision-tenant hook carries
+# the caller-set tenant user list as TENANT_USERS. Overlays can point the
+# endpoints at an internal host and put email addresses in the user list,
+# so both classes must not survive the redactor.
+echo "checking dry-run-devstack-ui-redaction (UI endpoints and tenant users stay out)"
+devstack_ui_host="devstack-ui-$(date +%s)-$$.internal.example.com"
+devstack_email="tenant-admin-$(date +%s)-$$@internal.example.com"
+cat >"${TMP_DIR}/dryrun-devstack-ui.yaml" <<DEVSTACK_UI_EOF
+ui:
+  api:
+    fulfillment:
+      url: https://${devstack_ui_host}:8000
+  auth:
+    oidcIssuerURL: https://${devstack_ui_host}:8443/realms/osac
+tenant:
+  users: "tenant1_user,${devstack_email}"
+DEVSTACK_UI_EOF
+if ! helm template osac-devstack "${DEVSTACK_CHART_DIR}" \
+    --namespace osac \
+    --set osacNamespace=osac \
+    --set awx.enabled=false \
+    -f "${TMP_DIR}/dryrun-devstack-ui.yaml" \
+    | "${SCRIPT_DIR}/redact-secret-values.sh" \
+    >"${TMP_DIR}/dryrun-devstack-ui-rendered.yaml" 2>>"${netbox_gate_err}"; then
+  fail "dry-run-devstack-ui-redaction: the osac-devstack chart render failed"
+fi
+for leaked in "${devstack_ui_host}" "${devstack_email}"; do
+  grep -Fq "${leaked}" "${TMP_DIR}/dryrun-devstack-ui-rendered.yaml" \
+    && fail "dry-run-devstack-ui-redaction: caller data reached the dry-run output (${leaked})"
+done
+grep -Fq 'FULFILLMENT_API_URL: <redacted>' "${TMP_DIR}/dryrun-devstack-ui-rendered.yaml" \
+  || fail "dry-run-devstack-ui-redaction: the fulfillment API URL was not masked"
+grep -Fq 'OIDC_ISSUER_URL: <redacted>' "${TMP_DIR}/dryrun-devstack-ui-rendered.yaml" \
+  || fail "dry-run-devstack-ui-redaction: the OIDC issuer URL was not masked"
+grep -Fq 'LOG_LEVEL: "info"' "${TMP_DIR}/dryrun-devstack-ui-rendered.yaml" \
+  || fail "dry-run-devstack-ui-redaction: a non-endpoint ConfigMap entry was masked"
+grep -A1 'name: TENANT_USERS' "${TMP_DIR}/dryrun-devstack-ui-rendered.yaml" \
+  | grep -q 'value: <redacted>' \
+  || fail "dry-run-devstack-ui-redaction: the tenant user list was not masked"
+
 # Kafka broker lists are endpoint data too: an overlay setting
 # metering.kafka.brokers reaches the metering Deployment and its adapters
 # as the KAFKA_BROKERS env value, whose name matches neither the
@@ -1669,6 +1727,21 @@ kafka_masked=$(grep -A1 'name: KAFKA_BROKERS' "${TMP_DIR}/dryrun-kafka-rendered.
   | grep -c 'value: <redacted>')
 [ "${kafka_masked}" -ge 2 ] \
   || fail "dry-run-kafka-brokers-redaction: a KAFKA_BROKERS value was not masked (${kafka_masked}/2)"
+
+# Helm leaves a simple env name unquoted, but the redactor also runs over
+# caller-supplied manifests (netbox.extraDeploy), where either quote style
+# can appear; the exact KAFKA_BROKERS compare must survive the quotes.
+echo "checking dry-run-quoted-env-name-redaction (quoted env names stay masked)"
+printf '%s\n' 'kind: Deployment' 'spec:' '  template:' '    spec:' \
+  '      containers:' '      - env:' \
+  "        - name: 'KAFKA_BROKERS'" \
+  '          value: quoted-broker.internal.example.com:9093' \
+  | "${SCRIPT_DIR}/redact-secret-values.sh" >"${TMP_DIR}/dryrun-quoted-env.yaml"
+grep -Fq 'quoted-broker.internal.example.com' "${TMP_DIR}/dryrun-quoted-env.yaml" \
+  && fail "dry-run-quoted-env-name-redaction: a single-quoted env value was kept"
+grep -A1 "name: 'KAFKA_BROKERS'" "${TMP_DIR}/dryrun-quoted-env.yaml" \
+  | grep -q 'value: <redacted>' \
+  || fail "dry-run-quoted-env-name-redaction: the quoted env value was not masked"
 
 # Image overrides carry the internal registry hostname into every image
 # reference the dry run prints. The registry host is masked unless it is

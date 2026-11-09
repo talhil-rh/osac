@@ -11,30 +11,36 @@
 # peer addresses), and the MCE maps (`osac-infra-mce-image-overrides`,
 # carrying registry hostnames in its manifest, and
 # `osac-infra-mce-config`, carrying internal OS image mirror URLs in its
-# osImages); container env entry values whose variable name is
+# osImages); ConfigMap data entries whose key is endpoint-shaped
+# (URL/HOST/ADDR/ENDPOINT, such as the UI chart's FULFILLMENT_API_URL and
+# OIDC_ISSUER_URL), since a caller override can point them at an internal
+# host; container env entry values whose variable name is
 # credential-shaped (PASSWORD/SECRET/TOKEN/ACCESS_KEY/AUTH/..., any
 # *_KEY-suffixed name such as SIGNING_KEY or ENCRYPTION_KEY, and
-# DSN/connection-string names, which often embed a password) or
+# DSN/connection-string names, which often embed a password),
 # endpoint-shaped (URL/HOST/ADDR/..., Kafka broker lists such as
-# KAFKA_BROKERS, whose metering value carries internal broker hosts, and
-# service-name-shaped names such as INTERNAL_SVC, whose caller-overridden
-# value is an internal service name), which callers can inject into
-# workload specs as plain text instead of Secret references; and the
-# registry host of image references that do not point at a well-known
-# public registry, since image overrides carry internal registry
-# hostnames; the resourceNames of RBAC rules that target Secrets --
-# netbox.apiTokenSecret is customer-supplied and carries the same
-# internal-identifier risk, so only Secret-scoped rules are masked and
-# other resourceNames stay readable. The dnsNames and commonName of
-# rendered Certificates, the host of Routes, and the hostnames of
-# Gateway API routes and Gateways -- in full, including two-label
-# service.namespace names and .svc/.cluster.local-suffixed names,
-# because caller-supplied internal hostnames cannot be told apart from
-# chart-internal ones by shape, and the keycloak route hostname and
-# cluster domain land in the same fields. Block-scalar bodies of
-# masked env values are dropped with their value line. Resource
-# structure, Secret/ConfigMap names and keys, and every other value
-# stay readable so the dry run remains useful for review.
+# KAFKA_BROKERS, whose metering value carries internal broker hosts),
+# service-name-shaped (such as INTERNAL_SVC, whose caller-overridden value
+# is an internal service name), or user-shaped (TENANT_USERS, whose value
+# is a caller-supplied tenant user list that can carry email addresses),
+# which callers can inject into workload specs as plain text instead of
+# Secret references; and the registry host of image references that do not
+# point at a well-known public registry, since image overrides carry
+# internal registry hostnames; the resourceNames of RBAC rules that target
+# Secrets -- netbox.apiTokenSecret is customer-supplied and carries the
+# same internal-identifier risk, so only Secret-scoped rules are masked,
+# other resourceNames stay readable, and each rule's scope is resolved
+# from its resources regardless of key order. The dnsNames and commonName
+# of rendered Certificates, the host of Routes, the hostnames of Gateway
+# API routes, and the hostname of each Gateway listener -- in full,
+# including two-label service.namespace names and
+# .svc/.cluster.local-suffixed names, because caller-supplied internal
+# hostnames cannot be told apart from chart-internal ones by shape, and
+# the keycloak route hostname and cluster domain land in the same fields.
+# Block-scalar bodies of masked env values and masked ConfigMap values
+# are dropped with their value line. Resource structure,
+# Secret/ConfigMap names and keys, and every other value stay readable so
+# the dry run remains useful for review.
 set -euo pipefail
 
 # Helm renders each resource as a top-level document: kind and the data /
@@ -48,8 +54,9 @@ set -euo pipefail
 # credential-name check only has to look one line ahead; a block-scalar
 # value keeps its body on the following, deeper-indented lines, which are
 # dropped until a line at or shallower than the value line's indent ends
-# the block. RBAC rules list their target resources before resourceNames,
-# so the Secret-scope check reads the sibling resources list.
+# the block. An RBAC rule may list its keys in any order, so each
+# document's resourceNames lines are scoped to their rule's resources
+# before the line pass runs.
 awk '
 # Masks every entry of a flow-style hostname list on the given line,
 # keeping the key and the list shape intact.
@@ -67,10 +74,67 @@ function mask_flow_list(line,    head, body, n, i, out) {
     }
     return head out "]"
 }
+# Indent of the key text on a line, counting a list-item dash as
+# structure so `- resources:` and `  resources:` compare as siblings.
+function key_indent(line,    indent) {
+    match(line, /^ */)
+    indent = RLENGTH
+    if (substr(line, indent + 1, 2) == "- ") indent += 2
+    return indent
+}
+# True when the rule whose resources key is at key_index targets Secrets:
+# flow-list entries parse from the key line, block-list entries follow at
+# the key indent or deeper and end at the next rule item (a mapping
+# key) or any non-item line.
+function rule_targets_secrets(key_index,    line, k, item, items, n, parts) {
+    line = document[key_index]
+    if (line ~ /resources:[[:space:]]*$/) {
+        for (k = key_index + 1; k <= document_length; k++) {
+            if (document[k] ~ /^[[:space:]]*#/ || document[k] ~ /^[[:space:]]*$/) continue
+            if (document[k] !~ /^[[:space:]]*- /) break
+            match(document[k], /^ */)
+            if (RLENGTH < key_indent(line)) break
+            item = document[k]
+            sub(/^[[:space:]]*- */, "", item)
+            sub(/[[:space:]]*#.*$/, "", item)
+            gsub(/["\047]/, "", item)
+            if (item ~ /:/) break
+            if (tolower(item) == "secrets") return 1
+        }
+        return 0
+    }
+    items = line
+    sub(/^[[:space:]]*(- )?resources: */, "", items)
+    gsub(/[\[\]"\047 ]/, "", items)
+    n = split(items, parts, ",")
+    for (k = 1; k <= n; k++) {
+        if (parts[k] == "secrets") return 1
+    }
+    return 0
+}
+# Marks every resourceNames line that belongs to a Secret-targeting rule.
+# The keys of a rule can come in any order (a Role supplied through
+# netbox.extraDeploy is arbitrary YAML), so each resourceNames line is
+# matched to the nearest resources sibling at the same key indent instead
+# of relying on resources appearing first.
+function mark_role_secret_names(    i, j, rn_indent, res_index, best, distance) {
+    for (i = 1; i <= document_length; i++) rn_secret[i] = 0
+    for (i = 1; i <= document_length; i++) {
+        if (document[i] !~ /^[[:space:]]*(- )?resourceNames:/) continue
+        rn_indent = key_indent(document[i])
+        res_index = 0; best = 0
+        for (j = 1; j <= document_length; j++) {
+            if (document[j] !~ /^[[:space:]]*(- )?resources:/) continue
+            if (key_indent(document[j]) != rn_indent) continue
+            distance = i > j ? i - j : j - i
+            if (best == 0 || distance < best) { best = distance; res_index = j }
+        }
+        if (res_index && rule_targets_secrets(res_index)) rn_secret[i] = 1
+    }
+}
 function flush_document(    index_line, metadata, name) {
     kind = ""; endpoint_configmap = 0; in_payload = 0; env_block = 0
-    env_await_value = 0; role_secret_rule = 0; role_res_block = 0
-    role_rn_block = 0; dns_block = 0
+    config_block = 0; env_await_value = 0; role_rn_block = 0; dns_block = 0
     for (index_line = 1; index_line <= document_length; index_line++) {
         $0 = document[index_line]
         if (/^kind: /) {
@@ -85,13 +149,14 @@ function flush_document(    index_line, metadata, name) {
         && (name ~ /-ig$/ || name == "osac-infra-evpn-config" \
             || name == "osac-infra-mce-image-overrides" \
             || name == "osac-infra-mce-config")
+    if (kind == "Role" || kind == "ClusterRole") mark_role_secret_names()
     for (index_line = 1; index_line <= document_length; index_line++) {
-        redact_line(document[index_line])
+        redact_line(document[index_line], index_line)
         delete document[index_line]
     }
     document_length = 0
 }
-function redact_line(line) {
+function redact_line(line, line_no) {
     $0 = line
     if (/^kind: /) {
         kind = $2
@@ -110,21 +175,17 @@ function redact_line(line) {
         if ($0 ~ /^ *$/ || RLENGTH > env_block_indent) return
         env_block = 0
     }
-    # Block-form RBAC lists carry their entries on the following lines, at
-    # the same indent as their key in the Helm rendering; the list ends at
-    # the first line at that indent that is not an entry. The resources
-    # entries set the Secret scope and the resourceNames entries are
-    # Secret names to mask.
-    if (role_res_block) {
+    # A masked ConfigMap value may be a block scalar too; its body lines
+    # are deeper-indented than the key and are dropped, like env blocks.
+    if (config_block) {
         match($0, /^ */)
-        if (RLENGTH >= role_res_indent && $0 ~ /^ *- /) {
-            role_res_item = $0
-            sub(/^ *- /, "", role_res_item)
-            if (role_res_item == "secrets") role_secret_rule = 1
-        } else {
-            role_res_block = 0
-        }
+        if ($0 ~ /^ *$/ || RLENGTH > config_block_indent) return
+        config_block = 0
     }
+    # Block-form resourceNames lists carry their entries on the following
+    # lines, at the same indent as their key in the Helm rendering; the
+    # list ends at the first line at that indent that is not an entry. The
+    # document pre-scan marks only the lists of Secret-targeting rules.
     if (role_rn_block) {
         match($0, /^ */)
         if (RLENGTH >= role_rn_indent && $0 ~ /^ *- /) {
@@ -182,6 +243,7 @@ function redact_line(line) {
             || tolower(env_name) ~ /(^|_)key$/ \
             || tolower(env_name) ~ /(url|host|endpoint|addr)/ \
             || tolower(env_name) ~ /(^|_)(svc|service)(_|$)/ \
+            || tolower(env_name) ~ /(^|_)(user|users|email|emails)(_|$)/ \
             || tolower(env_name) == "kafka_brokers")) {
             if ($0 ~ /value: [|>]/) {
                 match($0, /^ */)
@@ -196,37 +258,21 @@ function redact_line(line) {
         sub(/^[[:space:]]*- name: */, "", env_name)
         # Helm quotes env names only when needed, but the redactor runs
         # over whole manifests, so a quoted name must match too: strip
-        # the YAML double quotes before the exact KAFKA_BROKERS compare
-        # (the regex checks are substring-based and quote-agnostic).
-        gsub(/"/, "", env_name)
+        # the YAML quotes (either style) before the exact KAFKA_BROKERS
+        # compare (the regex checks are substring-based and quote-agnostic).
+        gsub(/["\047]/, "", env_name)
         env_await_value = 1
     }
     # RBAC rules that target Secrets name the Secret in resourceNames, and
     # a caller-set name (netbox.apiTokenSecret) carries the same
     # internal-identifier risk as the env values, so Secret-scoped rules
-    # are masked; other resourceNames stay readable for RBAC review. Each
-    # rules entry repeats its own resources list, which resets the scope.
-    # Both list forms are covered: the flow list on the key line and the
-    # block list whose entries follow at a deeper indent.
-    if ((kind == "Role" || kind == "ClusterRole") \
-        && $0 ~ /^[[:space:]]+resources:/) {
-        role_secret_rule = 0
-        if ($0 ~ /resources:$/) {
-            match($0, /^ */)
-            role_res_indent = RLENGTH
-            role_res_block = 1
-        } else {
-            role_res = $0
-            sub(/^[[:space:]]*resources: */, "", role_res)
-            gsub(/[\[\]" ]/, "", role_res)
-            role_n = split(role_res, role_arr, ",")
-            for (role_i = 1; role_i <= role_n; role_i++) {
-                if (role_arr[role_i] == "secrets") role_secret_rule = 1
-            }
-        }
-    }
-    if ((kind == "Role" || kind == "ClusterRole") && role_secret_rule \
-        && $0 ~ /^[[:space:]]+resourceNames:/) {
+    # are masked; other resourceNames stay readable for RBAC review. The
+    # document pre-scan resolved the resources of each rule regardless of
+    # key order and marked the lists to mask; both list forms are covered,
+    # the flow list on the key line and the block list whose entries
+    # follow.
+    if ((kind == "Role" || kind == "ClusterRole") && rn_secret[line_no] \
+        && $0 ~ /^[[:space:]]*(- )?resourceNames:/) {
         if ($0 ~ /resourceNames:$/) {
             match($0, /^ */)
             role_rn_indent = RLENGTH
@@ -235,12 +281,13 @@ function redact_line(line) {
             sub(/resourceNames: .*/, "resourceNames: [<redacted>]")
         }
     }
-    # Certificate commonName and dnsNames entries, Route hosts, and the
-    # hostnames of Gateway API routes and Gateways all carry hostnames,
-    # and caller-supplied internal hostnames cannot be told apart from
-    # chart-internal ones by shape, so every value in these fields is
-    # masked. Both list forms are covered: the flow list on the key line
-    # and the block list whose entries follow at the same indent.
+    # Certificate commonName and dnsNames entries, Route hosts, the
+    # hostname lists of Gateway API routes, and each Gateway listener
+    # hostname all carry hostnames, and caller-supplied internal hostnames
+    # cannot be told apart from chart-internal ones by shape, so every
+    # value in these fields is masked. Route hostname lists are covered in
+    # both forms: the flow list on the key line and the block list whose
+    # entries follow at the same indent.
     if (kind == "Certificate" && $0 ~ /^[[:space:]]+commonName: /) {
         sub(/commonName: .*/, "commonName: <redacted>")
     }
@@ -252,18 +299,38 @@ function redact_line(line) {
         dns_block_indent = RLENGTH
         dns_block = 1
     }
-    if ((kind ~ /Route$/ || kind == "Gateway") \
-        && $0 ~ /^[[:space:]]+hostnames: \[/) {
+    if (kind ~ /Route$/ && $0 ~ /^[[:space:]]+hostnames: \[/) {
         $0 = mask_flow_list($0)
     }
-    if ((kind ~ /Route$/ || kind == "Gateway") \
-        && $0 ~ /^[[:space:]]+hostnames:$/) {
+    if (kind ~ /Route$/ && $0 ~ /^[[:space:]]+hostnames:$/) {
         match($0, /^ */)
         dns_block_indent = RLENGTH
         dns_block = 1
     }
     if (kind == "Route" && $0 ~ /^[[:space:]]+host: /) {
         sub(/host: .*/, "host: <redacted>")
+    }
+    # A Gateway carries its host in the singular hostname field of each
+    # listener, never in a hostnames list.
+    if (kind == "Gateway" && $0 ~ /^[[:space:]]*(- )?hostname: /) {
+        sub(/hostname: .*/, "hostname: <redacted>")
+    }
+    # ConfigMap data entries whose key is endpoint-shaped carry a
+    # caller-overridable internal hostname (the FULFILLMENT_API_URL of
+    # the UI chart and OIDC_ISSUER_URL are plain data entries, not
+    # env entries), so they are masked in every ConfigMap; other data
+    # entries stay readable.
+    if (kind == "ConfigMap" && $0 ~ /^  [^ :][^:]*: ./) {
+        config_key = $0
+        sub(/:.*/, "", config_key)
+        if (tolower(config_key) ~ /(url|host|addr|endpoint)/) {
+            if ($0 ~ /: [|>]/) {
+                match($0, /^ */)
+                config_block_indent = RLENGTH
+                config_block = 1
+            }
+            sub(/: .*/, ": <redacted>")
+        }
     }
     if (in_payload) {
         # Block-scalar body lines (indent deeper than the entry keys) are

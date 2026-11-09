@@ -166,6 +166,7 @@ jobs:
       working-directory: osac-installer
       run: |
         make helm-infra-deps
+        make helm-devstack-deps
         helm dependency build charts/osac/
 
     - name: Test networking values
