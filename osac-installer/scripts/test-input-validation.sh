@@ -1322,6 +1322,7 @@ grep -q 'plainValue: readable' "${TMP_DIR}/dryrun-configmap-rendered.yaml" \
 echo "checking dry-run-configmap-file-redaction (file payloads from INFRA_VALUES_EXTRA stay out)"
 cm_file_password="configmap-file-password-$(date +%s)-$$"
 cm_file_token="configmap-file-token-$(date +%s)-$$"
+cm_file_key="configmap-file-key-$(date +%s)-$$"
 cat >"${TMP_DIR}/dryrun-configmap-file.yaml" <<CM_FILE_EOF
 netbox:
   extraDeploy:
@@ -1337,6 +1338,8 @@ netbox:
           token = ${cm_file_token}
           export DB_PASSWORD=${cm_file_password}
           - token: ${cm_file_token}
+          encryption_key: ${cm_file_key}
+          export SIGNING_KEY=${cm_file_key}
           author = readable
 CM_FILE_EOF
 if ! make -C "${INSTALLER_DIR}" --no-print-directory \
@@ -1354,6 +1357,8 @@ grep -Fq "${cm_file_password}" "${TMP_DIR}/dryrun-configmap-file.out" \
   && fail "dry-run-configmap-file-redaction: a file payload password survived"
 grep -Fq "${cm_file_token}" "${TMP_DIR}/dryrun-configmap-file.out" \
   && fail "dry-run-configmap-file-redaction: a file payload token survived"
+grep -Fq "${cm_file_key}" "${TMP_DIR}/dryrun-configmap-file.out" \
+  && fail "dry-run-configmap-file-redaction: a KEY-suffixed value survived"
 grep -q 'name: netbox-file-config' "${TMP_DIR}/dryrun-configmap-file.out" \
   || fail "dry-run-configmap-file-redaction: the overlay ConfigMap is missing"
 grep -q 'password = <redacted>' "${TMP_DIR}/dryrun-configmap-file.out" \

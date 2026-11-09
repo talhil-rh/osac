@@ -107,6 +107,11 @@ class InputRedactionTests(unittest.TestCase):
             f"    token = {self.token}\n"
             f"    export DB_PASSWORD={self.password}\n"
             f"    - token: {self.token}\n"
+            f"    encryption_key: {self.password}\n"
+            f"    export SIGNING_KEY={self.token}\n"
+            f"    signingKey: {self.token}\n"
+            "    key: readable-key\n"
+            "    tls.key: /etc/tls/tls.key\n"
             "    author = readable\n"
             "    ttl = 300\n"
             "  settings.yaml: |\n"
@@ -130,8 +135,12 @@ class InputRedactionTests(unittest.TestCase):
         self.assertIn("db_password=<redacted>", result.stdout)
         self.assertIn("export DB_PASSWORD=<redacted>", result.stdout)
         self.assertIn("- token: <redacted>", result.stdout)
+        self.assertIn("encryption_key: <redacted>", result.stdout)
+        self.assertIn("export SIGNING_KEY=<redacted>", result.stdout)
+        self.assertIn("signingKey: <redacted>", result.stdout)
         for readable in ("host = netbox-db", "author = readable", "ttl = 300",
-                         "oauth: oidc", "log_level=debug"):
+                         "oauth: oidc", "log_level=debug",
+                         "key: readable-key", "tls.key: /etc/tls/tls.key"):
             self.assertIn(readable, result.stdout)
 
     def test_netbox_extra_deploy_real_render(self):
