@@ -419,9 +419,11 @@ endif
 # KUBECONFIG= would otherwise leave helm/kubectl on localhost:8080. A caller
 # value was frozen verbatim above, under an origin guard; here it is only
 # compared through $(value ...) so a Make expression in it cannot expand. The
-# kind-file default stays chart-owned text.
+# kind-file default stays chart-owned text; it needs override because the
+# frozen value carries origin "override", which a plain assignment cannot
+# replace.
 ifeq ($(strip $(value KUBECONFIG)),)
-KUBECONFIG := $(KIND_KUBECONFIG)
+override KUBECONFIG := $(KIND_KUBECONFIG)
 endif
 export KUBECONFIG
 

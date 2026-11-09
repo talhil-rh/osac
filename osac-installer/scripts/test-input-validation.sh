@@ -428,6 +428,20 @@ grep -q 'Installer input validation passed' "${TMP_DIR}/kubeconfig.out" \
   || fail "kubeconfig-injection-make: the gate did not complete"
 assert_prevalidation_commands kubeconfig-injection-make
 
+# An empty caller KUBECONFIG is not a path: the Makefile must fall back to
+# the kind kubeconfig so helm never silently uses the home kubeconfig. The
+# frozen value has origin "override", so the fallback assignment must be an
+# override too; a plain assignment would leave the value empty.
+echo "checking kubeconfig-empty-fallback (an empty KUBECONFIG uses the kind file)"
+if ! KUBECONFIG= make -C "${SANDBOX}" --no-print-directory \
+    --eval='print-kubeconfig: ; @echo $(KUBECONFIG)' \
+    print-kubeconfig PLATFORM=kind PROFILE=dev NS=osac \
+    >"${TMP_DIR}/kubeconfig-empty.out" 2>"${TMP_DIR}/kubeconfig-empty.err"; then
+  fail "kubeconfig-empty-fallback: make rejected an empty KUBECONFIG"
+fi
+grep -q -- '-kind\.kubeconfig$' "${TMP_DIR}/kubeconfig-empty.out" \
+  || fail "kubeconfig-empty-fallback: an empty KUBECONFIG did not use the kind file"
+
 # Caller-supplied Helm args are data, never command text: EXTRA_HELM_ARGS
 # is frozen verbatim (no Make expression in it expands, including at
 # export time) and reaches recipes through the environment, so both Make

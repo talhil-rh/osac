@@ -145,6 +145,28 @@ class InputRedactionTests(unittest.TestCase):
                          "key: readable-key", "tls.key: /etc/tls/tls.key"):
             self.assertIn(readable, result.stdout)
 
+    def test_flow_style_secret_payloads_are_masked(self):
+        """Check flow-style data/stringData maps are masked as a whole."""
+        manifest = (
+            "kind: Secret\nmetadata:\n  name: flow-secret\n"
+            f"stringData: {{password: {self.password}}}\n"
+            "---\n"
+            "kind: Secret\nmetadata:\n  name: flow-multiline\n"
+            f"data: {{password: {self.password},\n"
+            f"  token: {self.token}}}\n"
+            "---\nkind: ConfigMap\nmetadata:\n  name: readable\n"
+            "data:\n  mode: foreground\n"
+        )
+        result = subprocess.run(
+            [str(INSTALLER / "scripts/redact-secret-values.sh")],
+            input=manifest, text=True, capture_output=True, check=True,
+        )
+        self.assert_private(result.stdout + result.stderr)
+        self.assertEqual(result.stdout.count("stringData: {<redacted>}"), 1)
+        self.assertEqual(result.stdout.count("data: {<redacted>}"), 1)
+        self.assertIn("name: flow-multiline", result.stdout)
+        self.assertIn("name: readable", result.stdout)
+
     def test_netbox_extra_deploy_real_render(self):
         """Check a real render whose extraDeploy payload precedes its identity."""
         for data_first in (False, True):

@@ -84,6 +84,29 @@ function mask_flow_list(line,    head, body, n, i, out) {
     }
     return head out "]"
 }
+# Scans a flow collection for its matching close, starting from the given
+# open depth. Braces inside quoted scalars do not count. Returns the index
+# of the closing brace on this line, or 0 when the line ends first; the
+# depth still open is left in flow_depth.
+function flow_close(line, depth,    i, c, quote) {
+    quote = ""
+    for (i = 1; i <= length(line); i++) {
+        c = substr(line, i, 1)
+        if (quote != "") {
+            if (c == quote) quote = ""
+            continue
+        }
+        if (c == "\"" || c == "\047") { quote = c; continue }
+        if (c == "{") {
+            depth++
+        } else if (c == "}") {
+            depth--
+            if (depth == 0) { flow_depth = 0; return i }
+        }
+    }
+    flow_depth = depth
+    return 0
+}
 # True when a data key or env variable name is credential-shaped: the
 # secret-bearing words, any KEY-suffixed name (SIGNING_KEY, ENCRYPTION_KEY,
 # and the camelCase signingKey this chart family also uses), and
@@ -188,6 +211,7 @@ function flush_document(    index_line, metadata, name) {
     config_block = 0; config_file_block = 0; env_await_value = 0
     role_rn_block = 0; dns_block = 0
     configmap_document = 0; configmap_data = 0
+    payload_flow = 0; payload_flow_depth = 0
     for (index_line = 1; index_line <= document_length; index_line++) {
         $0 = document[index_line]
         if (/^kind: /) {
@@ -217,7 +241,31 @@ function redact_line(line, line_no) {
         gsub(/["\047]/, "", kind)
         print; return
     }
+    # Continuation lines of a flow-style Secret data/stringData map are
+    # dropped with it; see the flow-map rule below.
+    if (payload_flow) {
+        if (flow_close($0, payload_flow_depth) > 0) {
+            payload_flow = 0
+        } else {
+            payload_flow_depth = flow_depth
+        }
+        return
+    }
     if (kind == "Secret" && /^(data|stringData):[[:space:]]*(#.*)?$/) { in_payload = 1; print; return }
+    # A Secret data/stringData value can also be a flow map on one line or
+    # across several; the block-form rule above only matches an empty key
+    # line. The whole map body is replaced by a single <redacted> entry so
+    # the printed manifest stays valid YAML, and any continuation lines are
+    # dropped.
+    if (kind == "Secret" && /^(data|stringData):[[:space:]]*\{/) {
+        match($0, /^(data|stringData):[[:space:]]*\{/)
+        print substr($0, 1, RLENGTH) "<redacted>}"
+        if (flow_close(substr($0, RLENGTH + 1), 1) == 0) {
+            payload_flow = 1
+            payload_flow_depth = flow_depth
+        }
+        return
+    }
     if (endpoint_configmap && /^data:[[:space:]]*(#.*)?$/) { in_payload = 1; print; return }
     if (configmap_document && /^(data|binaryData):[[:space:]]*(#.*)?$/) { configmap_data = 1; print; return }
     if (/^[^ #]/) { in_payload = 0; configmap_data = 0 }
