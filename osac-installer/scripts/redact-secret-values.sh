@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Mask credential-bearing values from rendered manifests. `make
 # install-dry-run` (and DRY_RUN=1) prints the full rendered manifests to the
-# terminal and to collected CI logs, so three value classes are masked:
+# terminal and to collected CI logs, so these value classes are masked:
 # Secret `data`/`stringData` payloads (values supplied through values
 # overlays, including multi-line block scalars such as PEM keys); the data
 # of the endpoint-config ConfigMaps -- the AAP instance-group maps (`*-ig`,
@@ -21,13 +21,16 @@
 # endpoint-shaped (URL/HOST/ADDR/..., Kafka broker lists such as
 # KAFKA_BROKERS, whose metering value carries internal broker hosts),
 # service-name-shaped (such as INTERNAL_SVC, whose caller-overridden value
-# is an internal service name), or user-shaped (TENANT_USERS, whose value
-# is a caller-supplied tenant user list that can carry email addresses),
-# which callers can inject into workload specs as plain text instead of
-# Secret references; and the registry host of image references that do not
-# point at a well-known public registry, since image overrides carry
-# internal registry hostnames; the resourceNames of RBAC rules that target
-# Secrets -- netbox.apiTokenSecret is customer-supplied and carries the
+# is an internal service name), tenant-shaped (TENANT, whose value is the
+# caller-supplied tenant name), user-shaped (TENANT_USERS, whose value is
+# a caller-supplied tenant user list that can carry email addresses), or
+# image-shaped (OSAC_EE_IMAGE, whose caller-overridden value can point at
+# an internal registry), which callers can inject into workload specs as
+# plain text instead of Secret references; and the registry host of image
+# references that do not point at a well-known public registry, since
+# image overrides carry internal registry hostnames; the resourceNames
+# of RBAC rules that target Secrets -- netbox.apiTokenSecret is
+# customer-supplied and carries the
 # same internal-identifier risk, so only Secret-scoped rules are masked,
 # other resourceNames stay readable, and each rule's scope is resolved
 # from its resources regardless of key order. The dnsNames and commonName
@@ -86,10 +89,10 @@ function key_indent(line,    indent) {
 # flow-list entries parse from the key line, block-list entries follow at
 # the key indent or deeper and end at the next rule item (a mapping
 # key) or any non-item line.
-function rule_targets_secrets(key_index,    line, k, item, items, n, parts) {
+function rule_targets_secrets(key_index, rule_end,    line, k, item, items, n, parts) {
     line = document[key_index]
     if (line ~ /resources:[[:space:]]*$/) {
-        for (k = key_index + 1; k <= document_length; k++) {
+        for (k = key_index + 1; k <= rule_end; k++) {
             if (document[k] ~ /^[[:space:]]*#/ || document[k] ~ /^[[:space:]]*$/) continue
             if (document[k] !~ /^[[:space:]]*- /) break
             match(document[k], /^ */)
@@ -115,21 +118,36 @@ function rule_targets_secrets(key_index,    line, k, item, items, n, parts) {
 # Marks every resourceNames line that belongs to a Secret-targeting rule.
 # The keys of a rule can come in any order (a Role supplied through
 # netbox.extraDeploy is arbitrary YAML), so each resourceNames line is
-# matched to the nearest resources sibling at the same key indent instead
-# of relying on resources appearing first.
-function mark_role_secret_names(    i, j, rn_indent, res_index, best, distance) {
+# paired with resources in the same rule, never with a neighbouring rule:
+# a rule starts at each rules list item (a dash line whose item opens a
+# mapping) and ends at the next item or at a shallower line.
+function mark_role_secret_names(    i, j, rule_end, rule_indent, key_ind, res_secret) {
     for (i = 1; i <= document_length; i++) rn_secret[i] = 0
     for (i = 1; i <= document_length; i++) {
-        if (document[i] !~ /^[[:space:]]*(- )?resourceNames:/) continue
-        rn_indent = key_indent(document[i])
-        res_index = 0; best = 0
-        for (j = 1; j <= document_length; j++) {
-            if (document[j] !~ /^[[:space:]]*(- )?resources:/) continue
-            if (key_indent(document[j]) != rn_indent) continue
-            distance = i > j ? i - j : j - i
-            if (best == 0 || distance < best) { best = distance; res_index = j }
+        if (document[i] !~ /^[[:space:]]*- [^ ].*:/) continue
+        match(document[i], /^ */)
+        rule_indent = RLENGTH
+        key_ind = key_indent(document[i])
+        rule_end = document_length
+        for (j = i + 1; j <= document_length; j++) {
+            if (document[j] ~ /^[[:space:]]*$/ || document[j] ~ /^[[:space:]]*#/) continue
+            match(document[j], /^ */)
+            if (RLENGTH < rule_indent) { rule_end = j - 1; break }
+            if (RLENGTH == rule_indent \
+                && document[j] ~ /^[[:space:]]*- [^ ].*:/) { rule_end = j - 1; break }
         }
-        if (res_index && rule_targets_secrets(res_index)) rn_secret[i] = 1
+        res_secret = 0
+        for (j = i; j <= rule_end; j++) {
+            if (document[j] ~ /^[[:space:]]*(- )?resources:/ \
+                && key_indent(document[j]) == key_ind) {
+                if (rule_targets_secrets(j, rule_end)) res_secret = 1
+            }
+        }
+        if (!res_secret) continue
+        for (j = i; j <= rule_end; j++) {
+            if (document[j] ~ /^[[:space:]]*(- )?resourceNames:/ \
+                && key_indent(document[j]) == key_ind) rn_secret[j] = 1
+        }
     }
 }
 function flush_document(    index_line, metadata, name) {
@@ -243,7 +261,9 @@ function redact_line(line, line_no) {
             || tolower(env_name) ~ /(^|_)key$/ \
             || tolower(env_name) ~ /(url|host|endpoint|addr)/ \
             || tolower(env_name) ~ /(^|_)(svc|service)(_|$)/ \
+            || tolower(env_name) ~ /(^|_)(tenant|tenants)(_|$)/ \
             || tolower(env_name) ~ /(^|_)(user|users|email|emails)(_|$)/ \
+            || tolower(env_name) ~ /(^|_)image$/ \
             || tolower(env_name) == "kafka_brokers")) {
             if ($0 ~ /value: [|>]/) {
                 match($0, /^ */)

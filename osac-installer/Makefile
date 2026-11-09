@@ -67,6 +67,13 @@ REMOTE_KUBECONFIG_SECRET_KEY ?= kubeconfig
 override REMOTE_KUBECONFIG_SECRET_NAME := $(value REMOTE_KUBECONFIG_SECRET_NAME)
 override REMOTE_KUBECONFIG_SECRET_KEY := $(value REMOTE_KUBECONFIG_SECRET_KEY)
 export REMOTE_KUBECONFIG_SECRET_NAME REMOTE_KUBECONFIG_SECRET_KEY
+# REMOTE_API_ADDRESS is caller-supplied and is read by the parse-time
+# multicluster conditionals below and by install recipes, so it is frozen
+# verbatim before either runs: a Make expression in the value must not
+# execute at parse time. The https check reads it from the exported
+# environment rather than from Make expansion into recipe text.
+override REMOTE_API_ADDRESS := $(value REMOTE_API_ADDRESS)
+export REMOTE_API_ADDRESS
 # NS is validated through the exported environment -- never through Make
 # expansion into command text -- so a value carrying shell metacharacters
 # cannot execute. Freezing the value verbatim (like the identifiers above)
@@ -619,6 +626,13 @@ endif
 ##@ Entity: Osac
 
 AAP_LICENSE_FILE ?= values/$(PROFILE)/license.zip
+# A caller-supplied path is frozen verbatim (the default stays a Make
+# expression, so it is guarded by origin) and reaches the shell as
+# environment data rather than as recipe text.
+ifneq ($(filter command line environment,$(origin AAP_LICENSE_FILE)),)
+override AAP_LICENSE_FILE := $(value AAP_LICENSE_FILE)
+endif
+export AAP_LICENSE_FILE
 
 .PHONY: validate-osac-chart-oci-ref
 validate-osac-chart-oci-ref: ## Validate OSAC_CHART_OCI_REF/OSAC_CHART_OCI_VERSION and the Helm version they require
@@ -795,9 +809,9 @@ endif
 # install.
 validate-osac-inputs: validate-inputs
 ifneq ($(PLATFORM),kind)
-	@[ -n "$(AAP_LICENSE_FILE)" ] || { echo "ERROR: AAP_LICENSE_FILE is required for PLATFORM=openshift" >&2; exit 1; }
-	@[ -f "$(AAP_LICENSE_FILE)" ] || { echo "ERROR: AAP_LICENSE_FILE not found at $(AAP_LICENSE_FILE)" >&2; exit 1; }
-	@if [ -n "$(REMOTE_API_ADDRESS)" ]; then case "$(REMOTE_API_ADDRESS)" in https://*) ;; *) echo "ERROR: REMOTE_API_ADDRESS must use https://" >&2; exit 1 ;; esac; fi
+	@[ -n "$${AAP_LICENSE_FILE}" ] || { echo "ERROR: AAP_LICENSE_FILE is required for PLATFORM=openshift" >&2; exit 1; }
+	@[ -f "$${AAP_LICENSE_FILE}" ] || { echo "ERROR: AAP_LICENSE_FILE not found; check the path you supplied" >&2; exit 1; }
+	@if [ -n "$${REMOTE_API_ADDRESS}" ]; then case "$${REMOTE_API_ADDRESS}" in https://*) ;; *) echo "ERROR: REMOTE_API_ADDRESS must use https://" >&2; exit 1 ;; esac; fi
 endif
 
 .PHONY: install-osac
@@ -812,12 +826,12 @@ ifneq ($(PLATFORM),kind)
 		test -r "$(REMOTE_KUBECONFIG)" || { echo "ERROR: REMOTE_KUBECONFIG is not readable: $(REMOTE_KUBECONFIG)" >&2; exit 1; }; \
 		HUB_KUBECONFIG="$(KUBECONFIG)" \
 		REMOTE_KUBECONFIG="$(REMOTE_KUBECONFIG)" \
-		REMOTE_API_ADDRESS="$(REMOTE_API_ADDRESS)" \
+		REMOTE_API_ADDRESS="$${REMOTE_API_ADDRESS}" \
 		INSTALLER_NAMESPACE="$(NS)" \
 		bash scripts/stage-remote-cluster-secret.sh; \
 	fi
 	oc create secret generic config-as-code-manifest-ig \
-		--from-file=license.zip="$(AAP_LICENSE_FILE)" \
+		--from-file=license.zip="$${AAP_LICENSE_FILE}" \
 		-n $(NS) --dry-run=client -o yaml | oc apply --server-side -f -
 	oc label secret config-as-code-manifest-ig \
 		osac.openshift.io/project=osac-aap \
@@ -959,8 +973,8 @@ endif
 install-multicluster: validate-inputs ## Prepare a VMaaS workload cluster, then install OSAC on management in remote mode
 	@test -r "$(KUBECONFIG)" || { echo "ERROR: KUBECONFIG is not readable: $(KUBECONFIG)" >&2; exit 1; }
 	@test -r "$(REMOTE_KUBECONFIG)" || { echo "ERROR: REMOTE_KUBECONFIG is not readable: $(REMOTE_KUBECONFIG)" >&2; exit 1; }
-	@test -f "$(AAP_LICENSE_FILE)" || { echo "ERROR: AAP_LICENSE_FILE not found at $(AAP_LICENSE_FILE)" >&2; exit 1; }
-	@if [ -n "$(REMOTE_API_ADDRESS)" ]; then case "$(REMOTE_API_ADDRESS)" in https://*) ;; *) echo "ERROR: REMOTE_API_ADDRESS must use https://" >&2; exit 1 ;; esac; fi
+	@test -f "$${AAP_LICENSE_FILE}" || { echo "ERROR: AAP_LICENSE_FILE not found; check the path you supplied" >&2; exit 1; }
+	@if [ -n "$${REMOTE_API_ADDRESS}" ]; then case "$${REMOTE_API_ADDRESS}" in https://*) ;; *) echo "ERROR: REMOTE_API_ADDRESS must use https://" >&2; exit 1 ;; esac; fi
 	@oc --kubeconfig "$(KUBECONFIG)" get clusterversion version >/dev/null
 	@oc --kubeconfig "$(REMOTE_KUBECONFIG)" get clusterversion version >/dev/null
 	@for kubeconfig in "$(KUBECONFIG)" "$(REMOTE_KUBECONFIG)"; do \
@@ -983,7 +997,7 @@ install-multicluster: validate-inputs ## Prepare a VMaaS workload cluster, then 
 	$(MAKE) install-osac PLATFORM=openshift PROFILE=vmaas-ci NS=$(NS) \
 		KUBECONFIG="$(KUBECONFIG)" \
 		REMOTE_KUBECONFIG="$(REMOTE_KUBECONFIG)" \
-		REMOTE_API_ADDRESS="$(REMOTE_API_ADDRESS)" \
+		REMOTE_API_ADDRESS="$${REMOTE_API_ADDRESS}" \
 		EXTRA_HELM_ARGS="$${EXTRA_HELM_ARGS}"
 
 .PHONY: prepare-remote-cluster

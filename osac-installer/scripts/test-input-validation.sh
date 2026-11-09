@@ -1440,7 +1440,9 @@ grep -q 'value: foreground' "${TMP_DIR}/dryrun-env-keynames.yaml" \
 # hostnames): Secret-scoped resourceNames are masked in both list forms,
 # while resourceNames of other kinds stay readable for RBAC review. A rule
 # supplied through netbox.extraDeploy can order its keys freely, so the
-# Secret scope must not depend on resources appearing first.
+# Secret scope must not depend on resources appearing first, and each
+# resourceNames list is paired within its own rule: a five-entry list in
+# the rule after a configmaps rule must not borrow its neighbour scope.
 echo "checking dry-run-role-redaction (Secret resourceNames stay out)"
 printf '%s\n' 'kind: Role' 'rules:' '- apiGroups: [""]' \
   '  resources: ["secrets"]' \
@@ -1455,9 +1457,15 @@ printf '%s\n' 'kind: Role' 'rules:' '- apiGroups: [""]' \
   '  resources:' '  - secrets' '  verbs:' '  - get' \
   '- resourceNames: ["ordered-visible"]' '  resources: ["configmaps"]' \
   '  verbs: ["get"]' \
+  '- apiGroups: [""]' '  resources: ["configmaps"]' '  verbs: ["get"]' \
+  '- apiGroups: [""]' '  resourceNames:' '  - adjacent-one' '  - adjacent-two' \
+  '  - adjacent-three' '  - adjacent-four' '  - adjacent-five' \
+  '  verbs: ["get"]' '  resources: ["secrets"]' \
   | "${SCRIPT_DIR}/redact-secret-values.sh" >"${TMP_DIR}/dryrun-role-direct.yaml"
 for leaked in 'netbox.internal.example.com' 'token.netbox.internal.example.com' \
-  'ordered-flow.internal.example.com' 'ordered-block.internal.example.com'; do
+  'ordered-flow.internal.example.com' 'ordered-block.internal.example.com' \
+  'adjacent-one' 'adjacent-two' 'adjacent-three' 'adjacent-four' \
+  'adjacent-five'; do
   grep -Fq "${leaked}" "${TMP_DIR}/dryrun-role-direct.yaml" \
     && fail "dry-run-role-redaction: a Secret resourceName was kept (${leaked})"
 done
@@ -1699,6 +1707,43 @@ grep -Fq 'LOG_LEVEL: "info"' "${TMP_DIR}/dryrun-devstack-ui-rendered.yaml" \
 grep -A1 'name: TENANT_USERS' "${TMP_DIR}/dryrun-devstack-ui-rendered.yaml" \
   | grep -q 'value: <redacted>' \
   || fail "dry-run-devstack-ui-redaction: the tenant user list was not masked"
+
+# The configure-awx and provision-tenant hooks carry the caller-overridden
+# execution environment image (OSAC_EE_IMAGE, which can point at an
+# internal registry) and the caller-supplied tenant name (TENANT) as plain
+# env values, so neither may survive the redactor.
+echo "checking dry-run-devstack-awx-redaction (execution image and tenant name stay out)"
+devstack_ee_registry="registry-$(date +%s)-$$.internal.example.com"
+devstack_tenant="tenant-$(date +%s)-$$-customer"
+cat >"${TMP_DIR}/dryrun-devstack-awx.yaml" <<DEVSTACK_AWX_EOF
+awx:
+  executionEnvironment:
+    image: ${devstack_ee_registry}/osac/osac-aap:ci
+tenant:
+  name: "${devstack_tenant}"
+DEVSTACK_AWX_EOF
+if ! helm template osac-devstack "${DEVSTACK_CHART_DIR}" \
+    --namespace osac \
+    --set osacNamespace=osac \
+    --set awx.enabled=true \
+    -f "${TMP_DIR}/dryrun-devstack-awx.yaml" \
+    | "${SCRIPT_DIR}/redact-secret-values.sh" \
+    >"${TMP_DIR}/dryrun-devstack-awx-rendered.yaml" 2>>"${netbox_gate_err}"; then
+  fail "dry-run-devstack-awx-redaction: the osac-devstack chart render failed"
+fi
+for leaked in "${devstack_ee_registry}" "${devstack_tenant}"; do
+  grep -Fq "${leaked}" "${TMP_DIR}/dryrun-devstack-awx-rendered.yaml" \
+    && fail "dry-run-devstack-awx-redaction: caller data reached the dry-run output (${leaked})"
+done
+grep -A1 'name: OSAC_EE_IMAGE' "${TMP_DIR}/dryrun-devstack-awx-rendered.yaml" \
+  | grep -q 'value: <redacted>' \
+  || fail "dry-run-devstack-awx-redaction: the execution environment image was not masked"
+grep -A1 'name: TENANT$' "${TMP_DIR}/dryrun-devstack-awx-rendered.yaml" \
+  | grep -q 'value: <redacted>' \
+  || fail "dry-run-devstack-awx-redaction: the tenant name was not masked"
+grep -A1 'name: OSAC_EE_PULL' "${TMP_DIR}/dryrun-devstack-awx-rendered.yaml" \
+  | grep -q 'value: "missing"' \
+  || fail "dry-run-devstack-awx-redaction: a benign env value was masked"
 
 # Kafka broker lists are endpoint data too: an overlay setting
 # metering.kafka.brokers reaches the metering Deployment and its adapters
