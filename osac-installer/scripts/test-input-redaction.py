@@ -17,7 +17,10 @@ HELM = shutil.which(os.environ.get("HELM_BIN", "helm"))
 
 
 class InputRedactionTests(unittest.TestCase):
+    """Regression tests for redaction and private validation diagnostics."""
+
     def setUp(self):
+        """Create a temporary directory and the canary values used below."""
         self.temp = tempfile.TemporaryDirectory(prefix="osac-redaction-")
         self.addCleanup(self.temp.cleanup)
         self.directory = Path(self.temp.name)
@@ -27,10 +30,12 @@ class InputRedactionTests(unittest.TestCase):
         self.url = f"https://{self.username}:{self.password}@{self.hostname}"
 
     def assert_private(self, output):
+        """Fail when any canary value appears in the given output."""
         for value in (self.username, self.password, self.hostname):
             self.assertFalse(value in output, "sensitive canary reached output")
 
     def redact(self, manifest):
+        """Run the redactor and check canaries are gone and safe values kept."""
         result = subprocess.run(
             [str(INSTALLER / "scripts/redact-secret-values.sh")],
             input=manifest, text=True, capture_output=True, check=True,
@@ -41,6 +46,7 @@ class InputRedactionTests(unittest.TestCase):
         self.assertIn("mode: foreground", result.stdout)
 
     def test_direct_document_orders(self):
+        """Check payload masking for every kind regardless of field order."""
         for kind, name in (("Secret", "readable"), ("ConfigMap", "network-ig"),
                            ("ConfigMap", "osac-infra-evpn-config"),
                            ("ConfigMap", "osac-infra-mce-config"),
@@ -61,6 +67,7 @@ class InputRedactionTests(unittest.TestCase):
                     self.redact(manifest)
 
     def test_netbox_extra_deploy_real_render(self):
+        """Check a real render whose extraDeploy payload precedes its identity."""
         for data_first in (False, True):
             with self.subTest(data_first=data_first):
                 resources = []
@@ -82,6 +89,7 @@ class InputRedactionTests(unittest.TestCase):
                 self.redact(result.stdout + "\n---\nkind: ConfigMap\nmetadata:\n  name: readable\ndata:\n  mode: foreground\n")
 
     def test_comments_quoted_kinds_and_document_boundaries(self):
+        """Check masking survives comments, quoted kinds, and separators."""
         for kind, name in (("Secret", "readable"), ("ConfigMap", "network-ig"),
                            ("ConfigMap", "osac-infra-evpn-config"),
                            ("ConfigMap", "osac-infra-mce-config"),
@@ -97,6 +105,7 @@ class InputRedactionTests(unittest.TestCase):
                 self.redact(manifest)
 
     def test_payload_comments_do_not_end_masking(self):
+        """Check a comment inside a payload does not end payload masking."""
         self.redact(
             f'kind: Secret\nmetadata:\n  name: readable\nstringData:\n'
             f'# ordinary payload comment\n  payload: |\n    {self.password}\n'
@@ -105,6 +114,7 @@ class InputRedactionTests(unittest.TestCase):
         )
 
     def test_masking_state_resets_between_documents(self):
+        """Check masking state from one document does not leak into the next."""
         self.redact(
             f'kind: Secret\nmetadata:\n  name: readable\ndata:\n  payload: {self.url}\n'
             '---\nkind: Deployment\nspec:\n  - name: API_TOKEN\n'
@@ -113,6 +123,7 @@ class InputRedactionTests(unittest.TestCase):
         )
 
     def test_failure_diagnostics_do_not_echo_canaries(self):
+        """Check a failed assertion's diagnostic output does not echo canaries."""
         output = io.StringIO()
         case = unittest.FunctionTestCase(lambda: self.assert_private(self.url))
         result = unittest.TextTestRunner(stream=output).run(case)
@@ -120,6 +131,7 @@ class InputRedactionTests(unittest.TestCase):
         self.assert_private(output.getvalue())
 
     def test_aap_validation_does_not_echo_url(self):
+        """Check AAP URL validation rejects a credential URL without echoing it."""
         values = self.directory / "aap.json"
         values.write_text(json.dumps({"instanceGroups": {"networkFulfillment": {
             "config": {"NETRIS_CONTROLLER_URL": self.url}}}}))
@@ -134,6 +146,7 @@ class InputRedactionTests(unittest.TestCase):
         self.assertNotIn("without embedded credentials", result.stderr)
 
     def test_aap_url_validation_policy_is_unchanged(self):
+        """Check a credential-free URL still renders under the existing policy."""
         values = self.directory / "aap-valid.json"
         values.write_text(json.dumps({"instanceGroups": {"networkFulfillment": {
             "config": {"NETRIS_CONTROLLER_URL": f"https://{self.username}@{self.hostname}/api"}}}}))
@@ -144,6 +157,8 @@ class InputRedactionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, "the existing URL policy changed")
 
     def test_make_gate_initial_and_retry_errors_are_private(self):
+        """Check the make gate keeps a failing render's error private, with or
+        without the Secret-injection retry."""
         chart = self.directory / "chart"
         (chart / "templates").mkdir(parents=True)
         (chart / "Chart.yaml").write_text("apiVersion: v2\nname: diagnostic\nversion: 0.1.0\n")
@@ -184,6 +199,7 @@ class InputRedactionTests(unittest.TestCase):
                 self.assertEqual(len(calls.read_text().splitlines()), 2 if retry else 1)
 
     def test_make_gate_real_aap_error_is_private(self):
+        """Check the real AAP render failure through the make gate stays private."""
         values = self.directory / "osac.json"
         values.write_text(json.dumps({"aap": {"instanceGroups": {"networkFulfillment": {
             "config": {"NETRIS_CONTROLLER_URL": self.url}}}}}))

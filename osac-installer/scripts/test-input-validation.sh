@@ -19,6 +19,7 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 INSTALLER_DIR=$(cd -- "${SCRIPT_DIR}/.." && pwd)
 OSAC_CHART_DIR="${INSTALLER_DIR}/charts/osac"
 INFRA_CHART_DIR="${INSTALLER_DIR}/charts/osac-infra"
+DEVSTACK_CHART_DIR="${INSTALLER_DIR}/charts/osac-devstack"
 HELM_BIN=${HELM_BIN:-helm}
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "${TMP_DIR}"' EXIT
@@ -1598,6 +1599,33 @@ grep -A1 'name: MCP_RESOURCE_URL' "${TMP_DIR}/dryrun-mcp-rendered.yaml" \
   | grep -q 'value: <redacted>' \
   || fail "dry-run-endpoint-env-redaction: the endpoint env value was not masked"
 
+# Devstack hooks receive their target service name through INTERNAL_SVC,
+# and catalog.internalApiService is a caller override, so the value can be
+# an internal service name. Service-name-shaped env names are masked like
+# endpoint-shaped ones; the env name itself stays readable.
+echo "checking dry-run-internal-svc-redaction (service-name env values stay out)"
+devstack_svc="devstack-internal-$(date +%s)-$$.internal.example.com"
+printf 'catalog:\n  internalApiService: %s\n' "${devstack_svc}" \
+  >"${TMP_DIR}/dryrun-devstack-svc.yaml"
+if ! helm template osac-devstack "${DEVSTACK_CHART_DIR}" \
+    --namespace osac \
+    --set osacNamespace=osac \
+    --set ui.enabled=false \
+    --set awx.enabled=false \
+    -f "${TMP_DIR}/dryrun-devstack-svc.yaml" \
+    | "${SCRIPT_DIR}/redact-secret-values.sh" \
+    >"${TMP_DIR}/dryrun-devstack-svc-rendered.yaml" 2>>"${netbox_gate_err}"; then
+  fail "dry-run-internal-svc-redaction: the osac-devstack chart render failed"
+fi
+grep -Fq "${devstack_svc}" "${TMP_DIR}/dryrun-devstack-svc-rendered.yaml" \
+  && fail "dry-run-internal-svc-redaction: an internal service name reached the dry-run output"
+grep -A1 'name: INTERNAL_SVC' "${TMP_DIR}/dryrun-devstack-svc-rendered.yaml" \
+  | grep -q 'value: <redacted>' \
+  || fail "dry-run-internal-svc-redaction: the service-name env value was not masked"
+grep -A1 'name: INTERNAL_PORT' "${TMP_DIR}/dryrun-devstack-svc-rendered.yaml" \
+  | grep -q 'value: "8001"' \
+  || fail "dry-run-internal-svc-redaction: the service port entry was masked or lost"
+
 # Kafka broker lists are endpoint data too: an overlay setting
 # metering.kafka.brokers reaches the metering Deployment and its adapters
 # as the KAFKA_BROKERS env value, whose name matches neither the
@@ -1652,6 +1680,26 @@ grep -q 'image: quay.io/sclorg' "${TMP_DIR}/dryrun-registry-rendered.yaml" \
   || fail "dry-run-image-registry-redaction: a public registry image was masked"
 grep -q 'image: ghcr.io/openbao' "${TMP_DIR}/dryrun-registry-rendered.yaml" \
   || fail "dry-run-image-registry-redaction: a public registry image was masked"
+
+# Container entries render as either `image:` keys or `- image:` list
+# items, and a quoted value can use either quote style; the registry-host
+# rule covers all of them and keeps the quoting in the output so the
+# masked YAML stays valid.
+echo "checking dry-run-image-list-redaction (list-item image registries stay out)"
+list_reg="list-registry-$(date +%s)-$$.internal.example.com"
+printf '%s\n' 'spec:' '  containers:' \
+  "  - image: ${list_reg}/repo/one:1" \
+  "  - image: '${list_reg}/repo/two:1'" \
+  '  - image: quay.io/sclorg/cli:1' \
+  | "${SCRIPT_DIR}/redact-secret-values.sh" >"${TMP_DIR}/dryrun-image-list.yaml"
+grep -Fq "${list_reg}" "${TMP_DIR}/dryrun-image-list.yaml" \
+  && fail "dry-run-image-list-redaction: a list-item registry host reached the dry-run output"
+grep -q -- '- image: <redacted>/repo/one:1' "${TMP_DIR}/dryrun-image-list.yaml" \
+  || fail "dry-run-image-list-redaction: the unquoted list-item image was not masked"
+grep -q -- "- image: '<redacted>/repo/two:1'" "${TMP_DIR}/dryrun-image-list.yaml" \
+  || fail "dry-run-image-list-redaction: the single-quoted list-item image was not masked"
+grep -q 'image: quay.io/sclorg/cli:1' "${TMP_DIR}/dryrun-image-list.yaml" \
+  || fail "dry-run-image-list-redaction: a public registry image was masked"
 
 # The MCE image-overrides ConfigMap carries registry hostnames in its
 # manifest data (the image-remote fields); the dry run must mask it like

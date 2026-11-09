@@ -478,6 +478,7 @@ create_cluster osac-dev config.yaml {shlex.quote(str(kubeconfig))}
 ''')
 
     def test_direct_infra_preserves_vendored_dependencies(self):
+        """Check direct infra setup keeps each chart's vendored dependencies."""
         sandbox = self.directory / "installer"
         shutil.copytree(INSTALLER, sandbox)
         sentinels = [sandbox / "charts" / chart / "charts/preservation-sentinel"

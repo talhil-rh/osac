@@ -15,9 +15,10 @@
 # credential-shaped (PASSWORD/SECRET/TOKEN/ACCESS_KEY/AUTH/..., any
 # *_KEY-suffixed name such as SIGNING_KEY or ENCRYPTION_KEY, and
 # DSN/connection-string names, which often embed a password) or
-# endpoint-shaped (URL/HOST/ADDR/..., plus Kafka broker lists such as
-# KAFKA_BROKERS, whose metering value carries internal broker hosts),
-# which callers can inject into
+# endpoint-shaped (URL/HOST/ADDR/..., Kafka broker lists such as
+# KAFKA_BROKERS, whose metering value carries internal broker hosts, and
+# service-name-shaped names such as INTERNAL_SVC, whose caller-overridden
+# value is an internal service name), which callers can inject into
 # workload specs as plain text instead of Secret references; and the
 # registry host of image references that do not point at a well-known
 # public registry, since image overrides carry internal registry
@@ -151,14 +152,16 @@ function redact_line(line) {
     # images through values, and an internal registry hostname is endpoint
     # data. The registry host is the first path segment when it contains a
     # dot or colon (or is localhost); well-known public registries stay
-    # readable so the common case remains reviewable.
-    if ($0 ~ /^[[:space:]]*image: /) {
-        match($0, /^[[:space:]]*image: */)
+    # readable so the common case remains reviewable. Container entries are
+    # rendered either as `image:` keys or as `- image:` list items, and a
+    # quoted value keeps its quote in the output so the YAML stays valid.
+    if ($0 ~ /^[[:space:]]*(- )?image: /) {
+        match($0, /^[[:space:]]*(- )?image: */)
         img_head = substr($0, 1, RLENGTH)
         img_val = substr($0, RLENGTH + 1)
         img_quote = ""
-        if (substr(img_val, 1, 1) == "\"") {
-            img_quote = "\""
+        if (substr(img_val, 1, 1) == "\"" || substr(img_val, 1, 1) == "\047") {
+            img_quote = substr(img_val, 1, 1)
             img_val = substr(img_val, 2)
         }
         img_n = split(img_val, img_seg, "/")
@@ -178,6 +181,7 @@ function redact_line(line) {
             /(password|passwd|passphrase|secret|token|credential|api_key|private_key|access_key|auth|session|dsn|conn(ection)?_?str)/ \
             || tolower(env_name) ~ /(^|_)key$/ \
             || tolower(env_name) ~ /(url|host|endpoint|addr)/ \
+            || tolower(env_name) ~ /(^|_)(svc|service)(_|$)/ \
             || tolower(env_name) == "kafka_brokers")) {
             if ($0 ~ /value: [|>]/) {
                 match($0, /^ */)
