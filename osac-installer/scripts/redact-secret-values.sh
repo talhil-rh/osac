@@ -98,14 +98,14 @@ function credential_name(name,    lower) {
 # Tighter than credential_name(): file content is prose-like, so the
 # ambiguous words auth/session must be a delimited component (an `author`
 # or `oauth` line is not a credential), while the unambiguous words match
-# anywhere (client_secret, DB_PASSWORD). A delimited KEY suffix and a
-# camelCase Key suffix are credentials too (encryption_key, SIGNING_KEY,
-# signingKey); a bare `key` stays readable because `- key: value` is
-# common in selectors, and dotted names like tls.key stay readable
-# because they usually hold file paths.
+# anywhere (client_secret, DB_PASSWORD, Authorization headers). A delimited
+# KEY suffix and a camelCase Key suffix are credentials too
+# (encryption_key, SIGNING_KEY, signingKey); a bare `key` stays readable
+# because `- key: value` is common in selectors, and dotted names like
+# tls.key stay readable because they usually hold file paths.
 function credential_file_key(name,    lower) {
     lower = tolower(name)
-    return lower ~ /(password|passwd|passphrase|secret|token|credential|api[_.-]?key|private[_.-]?key|access[_.-]?key|dsn)/ \
+    return lower ~ /(password|passwd|passphrase|secret|token|credential|authorization|api[_.-]?key|private[_.-]?key|access[_.-]?key|dsn)/ \
         || lower ~ /(^|[_.-])(auth|session)([_.-]|$)/ \
         || lower ~ /[_-]key$/ \
         || name ~ /[a-z0-9]Key$/

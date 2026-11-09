@@ -110,6 +110,7 @@ class InputRedactionTests(unittest.TestCase):
             f"    encryption_key: {self.password}\n"
             f"    export SIGNING_KEY={self.token}\n"
             f"    signingKey: {self.token}\n"
+            f"    Authorization: Bearer {self.token}\n"
             "    key: readable-key\n"
             "    tls.key: /etc/tls/tls.key\n"
             "    author = readable\n"
@@ -138,6 +139,7 @@ class InputRedactionTests(unittest.TestCase):
         self.assertIn("encryption_key: <redacted>", result.stdout)
         self.assertIn("export SIGNING_KEY=<redacted>", result.stdout)
         self.assertIn("signingKey: <redacted>", result.stdout)
+        self.assertIn("Authorization: <redacted>", result.stdout)
         for readable in ("host = netbox-db", "author = readable", "ttl = 300",
                          "oauth: oidc", "log_level=debug",
                          "key: readable-key", "tls.key: /etc/tls/tls.key"):
@@ -296,6 +298,20 @@ class InputRedactionTests(unittest.TestCase):
                 " in the following chart(s):\n"
                 f"osac:\n- at '/global/fulfillmentTrust': {self.url}\n",
                 "global/fulfillmentTrust: violates the values schema",
+            ),
+            (
+                "Error: values don't meet the specifications of the schema(s)"
+                " in the following chart(s):\n"
+                f"osac:\n- at '/operator/fabricDomainInventory/{self.hostname}':"
+                " must be non-empty\n",
+                "operator.fabricDomainInventory: violates the values schema",
+            ),
+            (
+                "Error: values don't meet the specifications of the schema(s)"
+                " in the following chart(s):\n"
+                f"osac:\n- operator.fabricDomainInventory.{self.hostname}:"
+                " must be non-empty\n",
+                "operator.fabricDomainInventory: violates the values schema",
             ),
         )
         for message, expected in cases:

@@ -159,8 +159,13 @@ offline_render_error() {
             # "- at '/a/b/c': <message>" and its message may embed the
             # value, so both matchers drop everything after the path and
             # the charset excludes value-shaped characters. Errors without
-            # a recognizable path still get the generic line alone.
+            # a recognizable path still get the generic line alone. The
+            # fabricDomainInventory entry key is customer-supplied (a
+            # hostname) and can itself appear in the path, so that path
+            # is printed without the entry key.
             printf '%s\n' "$1" | LC_ALL=C sed -nE \
+                -e "s|^- at '/operator/fabricDomainInventory/[^']*'.*|operator.fabricDomainInventory: violates the values schema|p" \
+                -e 's/^- operator\.fabricDomainInventory\.[^:]*: .*/operator.fabricDomainInventory: violates the values schema/p' \
                 -e "s|^- at '([A-Za-z0-9_/.~-]*)'.*|\1: violates the values schema|p" \
                 -e 's/^- ([A-Za-z0-9_.()-]+): .*/\1: violates the values schema/p' >&2 ;;
     esac
