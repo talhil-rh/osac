@@ -76,6 +76,7 @@ class InputRedactionTests(unittest.TestCase):
             f"  SECRET_KEY: {self.password}\n"
             f"  signingKey: {self.token}\n"
             f"  key: {self.token}\n"
+            f"  signing-key: {self.token}\n"
             "  plainValue: readable\n"
             "---\n"
             "data:\n"
@@ -93,6 +94,7 @@ class InputRedactionTests(unittest.TestCase):
         self.assertIn("SECRET_KEY: <redacted>", result.stdout)
         self.assertIn("signingKey: <redacted>", result.stdout)
         self.assertIn("\n  key: <redacted>\n", result.stdout)
+        self.assertIn("signing-key: <redacted>", result.stdout)
         self.assertEqual(result.stdout.count("plainValue: readable"), 2)
         self.assertNotIn("apiToken: |", result.stdout)
 
@@ -170,6 +172,27 @@ class InputRedactionTests(unittest.TestCase):
         self.assertEqual(result.stdout.count("data: {<redacted>}"), 1)
         self.assertIn("name: flow-multiline", result.stdout)
         self.assertIn("name: readable", result.stdout)
+
+    def test_url_userinfo_is_masked_outside_payloads(self):
+        """Check userinfo is masked in ConfigMap and env values."""
+        url = f"postgres://user:{self.password}@db/app"
+        manifest = (
+            "kind: ConfigMap\nmetadata:\n  name: netbox-integration\n"
+            f"data:\n  uri: {url}\n"
+            "  mode: foreground\n"
+            "---\n"
+            "kind: Deployment\nmetadata:\n  name: web\n"
+            "spec:\n  containers:\n    - name: app\n      env:\n"
+            "        - name: DATABASE_URI\n"
+            f"          value: {url}\n"
+        )
+        result = subprocess.run(
+            [str(INSTALLER / "scripts/redact-secret-values.sh")],
+            input=manifest, text=True, capture_output=True, check=True,
+        )
+        self.assert_private(result.stdout + result.stderr)
+        self.assertEqual(result.stdout.count("postgres://<redacted>@db/app"), 2)
+        self.assertIn("mode: foreground", result.stdout)
 
     def test_netbox_extra_deploy_real_render(self):
         """Check a real render whose extraDeploy payload precedes its identity."""

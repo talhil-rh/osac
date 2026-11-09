@@ -109,12 +109,12 @@ function flow_close(line, depth,    i, c, quote) {
 }
 # True when a data key or env variable name is credential-shaped: the
 # secret-bearing words, any KEY-suffixed name (SIGNING_KEY, ENCRYPTION_KEY,
-# and the camelCase signingKey this chart family also uses), and
-# DSN/connection-string names, which often embed a password.
+# signing-key, and the camelCase signingKey this chart family also uses),
+# and DSN/connection-string names, which often embed a password.
 function credential_name(name,    lower) {
     lower = tolower(name)
     return lower ~ /(password|passwd|passphrase|secret|token|credential|api_key|private_key|access_key|auth|session|dsn|conn(ection)?_?str)/ \
-        || lower ~ /(^|_)key$/ \
+        || lower ~ /(^|[_-])key$/ \
         || name ~ /[a-z0-9]Key$/
 }
 # True when a key inside a configuration-file payload is credential-shaped.
@@ -547,6 +547,11 @@ function redact_line(line, line_no) {
         if ($0 ~ /^   +[^ ]/) return
         if ($0 ~ /^  [^ :][^:]*: ./) sub(/: .*/, ": <redacted>")
     }
+    # Credentials embedded as URL userinfo are masked on every line,
+    # whatever the key or the container, because a neutral key such as
+    # uri or DATABASE_URI can still carry a password in a connection
+    # string.
+    gsub(/:\/\/[^\/[:space:]@]+@/, "://<redacted>@")
     print
 }
 /^---([[:space:]]+#.*)?[[:space:]]*$/ { separator = $0; flush_document(); print separator; next }
