@@ -152,6 +152,17 @@ offline_render_error() {
             echo "duplicate metering reader: each reader name must be unique" >&2 ;;
         *"NETRIS_CONTROLLER_URL must be an https:// URL"*)
             echo "instanceGroups.networkFulfillment.config.NETRIS_CONTROLLER_URL must be an https:// URL" >&2 ;;
+        *)
+            # Any other failure keeps the generic line above; extract only
+            # the schema field path so the user can find the offending
+            # input. Helm 3 prints "- a.b.c: <message>"; Helm 4 prints
+            # "- at '/a/b/c': <message>" and its message may embed the
+            # value, so both matchers drop everything after the path and
+            # the charset excludes value-shaped characters. Errors without
+            # a recognizable path still get the generic line alone.
+            printf '%s\n' "$1" | LC_ALL=C sed -nE \
+                -e "s|^- at '([A-Za-z0-9_/.~-]*)'.*|\1: violates the values schema|p" \
+                -e 's/^- ([A-Za-z0-9_.()-]+): .*/\1: violates the values schema/p' >&2 ;;
     esac
 }
 

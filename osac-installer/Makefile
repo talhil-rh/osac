@@ -88,6 +88,23 @@ export REMOTE_API_ADDRESS
 # expressions in an unvalidated NS at recipe-launch time.
 override NS := $(value NS)
 export NS
+# REMOTE_KUBECONFIG is caller-supplied and read by the parse-time
+# multicluster conditionals and by the REMOTE_CLUSTER_HELM_ARGS below, and
+# install-multicluster/prepare-remote-cluster pass it to sub-makes. Freeze
+# it verbatim before any of those run so a Make expression in the value
+# cannot execute at parse or export time; recipes read it from the exported
+# environment instead of Make expansion into shell text. It has no
+# Make-level default, so an unconditional freeze is safe.
+override REMOTE_KUBECONFIG := $(value REMOTE_KUBECONFIG)
+export REMOTE_KUBECONFIG
+# Freeze a caller-supplied KUBECONFIG here, before the first parse-time
+# $(shell ...) call: make expands command-line variables when it exports them
+# into a shell function's environment, so a Make expression in the value would
+# run there even though nothing reads KUBECONFIG yet. The kind-file default
+# and the export are applied below, where KIND_KUBECONFIG is known.
+ifneq ($(filter command line environment override,$(origin KUBECONFIG)),)
+override KUBECONFIG := $(value KUBECONFIG)
+endif
 
 # Remote-cluster kubeconfig Helm flags, shared by the input-validation gate's
 # osac-chart render and install-osac's upgrade so both see the same merged
@@ -397,10 +414,16 @@ KIND_KUBECONFIG := $(HOME)/.kube/$(KIND_CLUSTER_NAME)-kind-root.kubeconfig
 else
 KIND_KUBECONFIG := $(HOME)/.kube/$(KIND_CLUSTER_NAME)-kind.kubeconfig
 endif
-# Use the caller's KUBECONFIG if they set a non-empty one, otherwise the kind file.
-# `?=` is not enough: a shell that exports KUBECONFIG= (empty-but-defined) would keep
-# it empty and helm/kubectl would fall back to localhost:8080. `$(or ...)` skips empty.
-export KUBECONFIG := $(or $(KUBECONFIG),$(KIND_KUBECONFIG))
+# Use the caller's KUBECONFIG if they set a non-empty one, otherwise the kind
+# file. An empty-but-defined value still gets the default: a shell that exports
+# KUBECONFIG= would otherwise leave helm/kubectl on localhost:8080. A caller
+# value was frozen verbatim above, under an origin guard; here it is only
+# compared through $(value ...) so a Make expression in it cannot expand. The
+# kind-file default stays chart-owned text.
+ifeq ($(strip $(value KUBECONFIG)),)
+KUBECONFIG := $(KIND_KUBECONFIG)
+endif
+export KUBECONFIG
 
 # These local image references match the dev-full chart values.
 KIND_FULFILLMENT_IMAGE := ghcr.io/osac-project/fulfillment-service:latest
@@ -412,7 +435,7 @@ KIND_UI_IMAGE := ghcr.io/osac-project/osac-ui:latest
 KIND_LOAD_IMAGE_SCRIPT ?= $(abspath scripts/dev-full/kind-load-image.sh)
 define kind-load-local-image
 	$(KIND_RUNTIME_ENV) NS="$(NS)" \
-	KIND_CLUSTER_NAME="$(KIND_CLUSTER_NAME)" KUBECONFIG="$(KUBECONFIG)" \
+	KIND_CLUSTER_NAME="$(KIND_CLUSTER_NAME)" KUBECONFIG="$${KUBECONFIG}" \
 	CONTAINER_TOOL="$(CONTAINER_TOOL)" "$(KIND_LOAD_IMAGE_SCRIPT)" "$(1)"
 endef
 
@@ -822,10 +845,10 @@ ifndef OSAC_CHART_OCI_REF
 endif
 ifneq ($(PLATFORM),kind)
 	oc create namespace $(NS) --dry-run=client -o yaml | oc apply -f -
-	if [ -n "$(REMOTE_KUBECONFIG)" ]; then \
-		test -r "$(REMOTE_KUBECONFIG)" || { echo "ERROR: REMOTE_KUBECONFIG is not readable: $(REMOTE_KUBECONFIG)" >&2; exit 1; }; \
-		HUB_KUBECONFIG="$(KUBECONFIG)" \
-		REMOTE_KUBECONFIG="$(REMOTE_KUBECONFIG)" \
+	if [ -n "$${REMOTE_KUBECONFIG}" ]; then \
+		test -r "$${REMOTE_KUBECONFIG}" || { echo "ERROR: REMOTE_KUBECONFIG is not readable: $${REMOTE_KUBECONFIG}" >&2; exit 1; }; \
+		HUB_KUBECONFIG="$${KUBECONFIG}" \
+		REMOTE_KUBECONFIG="$${REMOTE_KUBECONFIG}" \
 		REMOTE_API_ADDRESS="$${REMOTE_API_ADDRESS}" \
 		INSTALLER_NAMESPACE="$(NS)" \
 		bash scripts/stage-remote-cluster-secret.sh; \
@@ -971,40 +994,40 @@ endif
 
 .PHONY: install-multicluster
 install-multicluster: validate-inputs ## Prepare a VMaaS workload cluster, then install OSAC on management in remote mode
-	@test -r "$(KUBECONFIG)" || { echo "ERROR: KUBECONFIG is not readable: $(KUBECONFIG)" >&2; exit 1; }
-	@test -r "$(REMOTE_KUBECONFIG)" || { echo "ERROR: REMOTE_KUBECONFIG is not readable: $(REMOTE_KUBECONFIG)" >&2; exit 1; }
+	@test -r "$${KUBECONFIG}" || { echo "ERROR: KUBECONFIG is not readable: $${KUBECONFIG}" >&2; exit 1; }
+	@test -r "$${REMOTE_KUBECONFIG}" || { echo "ERROR: REMOTE_KUBECONFIG is not readable: $${REMOTE_KUBECONFIG}" >&2; exit 1; }
 	@test -f "$${AAP_LICENSE_FILE}" || { echo "ERROR: AAP_LICENSE_FILE not found; check the path you supplied" >&2; exit 1; }
 	@if [ -n "$${REMOTE_API_ADDRESS}" ]; then case "$${REMOTE_API_ADDRESS}" in https://*) ;; *) echo "ERROR: REMOTE_API_ADDRESS must use https://" >&2; exit 1 ;; esac; fi
-	@oc --kubeconfig "$(KUBECONFIG)" get clusterversion version >/dev/null
-	@oc --kubeconfig "$(REMOTE_KUBECONFIG)" get clusterversion version >/dev/null
-	@for kubeconfig in "$(KUBECONFIG)" "$(REMOTE_KUBECONFIG)"; do \
+	@oc --kubeconfig "$${KUBECONFIG}" get clusterversion version >/dev/null
+	@oc --kubeconfig "$${REMOTE_KUBECONFIG}" get clusterversion version >/dev/null
+	@for kubeconfig in "$${KUBECONFIG}" "$${REMOTE_KUBECONFIG}"; do \
 		if [ "$$(oc --kubeconfig "$$kubeconfig" auth can-i '*' '*')" != yes ]; then \
 			echo "ERROR: cluster-admin access is required for $$kubeconfig" >&2; exit 1; \
 		fi; \
 	done
-	@hub_api="$$(oc --kubeconfig "$(KUBECONFIG)" config view --minify -o jsonpath='{.clusters[0].cluster.server}')"; \
-	remote_api="$$(oc --kubeconfig "$(REMOTE_KUBECONFIG)" config view --minify -o jsonpath='{.clusters[0].cluster.server}')"; \
+	@hub_api="$$(oc --kubeconfig "$${KUBECONFIG}" config view --minify -o jsonpath='{.clusters[0].cluster.server}')"; \
+	remote_api="$$(oc --kubeconfig "$${REMOTE_KUBECONFIG}" config view --minify -o jsonpath='{.clusters[0].cluster.server}')"; \
 	if [ -z "$$hub_api" ] || [ -z "$$remote_api" ] || [ "$$hub_api" = "$$remote_api" ]; then \
 		echo "ERROR: KUBECONFIG and REMOTE_KUBECONFIG must specify different API server endpoints" >&2; exit 1; \
 	fi
 	$(MAKE) prepare-remote-cluster NS=$(NS) \
-		REMOTE_KUBECONFIG="$(REMOTE_KUBECONFIG)" \
+		REMOTE_KUBECONFIG="$${REMOTE_KUBECONFIG}" \
 		REMOTE_STORAGE_CLASS="$(REMOTE_STORAGE_CLASS)" \
 		EVPN_VALUES="$(INFRA_VALUES)"
 	$(MAKE) install-infra PLATFORM=openshift PROFILE=vmaas-ci NS=$(NS) \
-		KUBECONFIG="$(KUBECONFIG)" \
+		KUBECONFIG="$${KUBECONFIG}" \
 		INFRA_VALUES_EXTRA="$${INFRA_VALUES_EXTRA}"
 	$(MAKE) install-osac PLATFORM=openshift PROFILE=vmaas-ci NS=$(NS) \
-		KUBECONFIG="$(KUBECONFIG)" \
-		REMOTE_KUBECONFIG="$(REMOTE_KUBECONFIG)" \
+		KUBECONFIG="$${KUBECONFIG}" \
+		REMOTE_KUBECONFIG="$${REMOTE_KUBECONFIG}" \
 		REMOTE_API_ADDRESS="$${REMOTE_API_ADDRESS}" \
 		EXTRA_HELM_ARGS="$${EXTRA_HELM_ARGS}"
 
 .PHONY: prepare-remote-cluster
 prepare-remote-cluster: validate-ns helm-infra-deps ## Prepare the remote VMaaS workload cluster without changing management
-	@test -r "$(REMOTE_KUBECONFIG)" || { echo "ERROR: REMOTE_KUBECONFIG is not readable: $(REMOTE_KUBECONFIG)" >&2; exit 1; }
-	@oc --kubeconfig "$(REMOTE_KUBECONFIG)" get clusterversion version >/dev/null
-	REMOTE_KUBECONFIG="$(REMOTE_KUBECONFIG)" \
+	@test -r "$${REMOTE_KUBECONFIG}" || { echo "ERROR: REMOTE_KUBECONFIG is not readable: $${REMOTE_KUBECONFIG}" >&2; exit 1; }
+	@oc --kubeconfig "$${REMOTE_KUBECONFIG}" get clusterversion version >/dev/null
+	REMOTE_KUBECONFIG="$${REMOTE_KUBECONFIG}" \
 	REMOTE_STORAGE_CLASS="$(REMOTE_STORAGE_CLASS)" \
 	EVPN_VALUES="$(EVPN_VALUES)" \
 	INSTALLER_NAMESPACE="$(NS)" \

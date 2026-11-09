@@ -14,7 +14,10 @@
 # osImages); ConfigMap data entries whose key is endpoint-shaped
 # (URL/HOST/ADDR/ENDPOINT, such as the UI chart's FULFILLMENT_API_URL and
 # OIDC_ISSUER_URL), since a caller override can point them at an internal
-# host; container env entry values whose variable name is
+# host, or credential-shaped (PASSWORD/SECRET/TOKEN/... and
+# *_KEY-suffixed names, such as a ConfigMap a values overlay renders
+# through the NetBox chart's extraDeploy), in every ConfigMap; container
+# env entry values whose variable name is
 # credential-shaped (PASSWORD/SECRET/TOKEN/ACCESS_KEY/AUTH/..., any
 # *_KEY-suffixed name such as SIGNING_KEY or ENCRYPTION_KEY, and
 # DSN/connection-string names, which often embed a password),
@@ -76,6 +79,15 @@ function mask_flow_list(line,    head, body, n, i, out) {
         out = out "<redacted>"
     }
     return head out "]"
+}
+# True when a data key or env variable name is credential-shaped: the
+# secret-bearing words, any *_KEY-suffixed name (SIGNING_KEY,
+# ENCRYPTION_KEY), and DSN/connection-string names, which often embed a
+# password.
+function credential_name(name,    lower) {
+    lower = tolower(name)
+    return lower ~ /(password|passwd|passphrase|secret|token|credential|api_key|private_key|access_key|auth|session|dsn|conn(ection)?_?str)/ \
+        || lower ~ /(^|_)key$/
 }
 # Indent of the key text on a line, counting a list-item dash as
 # structure so `- resources:` and `  resources:` compare as siblings.
@@ -153,6 +165,7 @@ function mark_role_secret_names(    i, j, rule_end, rule_indent, key_ind, res_se
 function flush_document(    index_line, metadata, name) {
     kind = ""; endpoint_configmap = 0; in_payload = 0; env_block = 0
     config_block = 0; env_await_value = 0; role_rn_block = 0; dns_block = 0
+    configmap_document = 0; configmap_data = 0
     for (index_line = 1; index_line <= document_length; index_line++) {
         $0 = document[index_line]
         if (/^kind: /) {
@@ -167,6 +180,7 @@ function flush_document(    index_line, metadata, name) {
         && (name ~ /-ig$/ || name == "osac-infra-evpn-config" \
             || name == "osac-infra-mce-image-overrides" \
             || name == "osac-infra-mce-config")
+    configmap_document = kind == "ConfigMap"
     if (kind == "Role" || kind == "ClusterRole") mark_role_secret_names()
     for (index_line = 1; index_line <= document_length; index_line++) {
         redact_line(document[index_line], index_line)
@@ -183,7 +197,8 @@ function redact_line(line, line_no) {
     }
     if (kind == "Secret" && /^(data|stringData):[[:space:]]*(#.*)?$/) { in_payload = 1; print; return }
     if (endpoint_configmap && /^data:[[:space:]]*(#.*)?$/) { in_payload = 1; print; return }
-    if (/^[^ #]/) in_payload = 0
+    if (configmap_document && /^(data|binaryData):[[:space:]]*(#.*)?$/) { configmap_data = 1; print; return }
+    if (/^[^ #]/) { in_payload = 0; configmap_data = 0 }
     # A masked block-scalar env value: its body lines are deeper-indented
     # than the value line itself and are dropped; a blank line inside the
     # block is dropped too. The first line at or shallower than the value
@@ -256,9 +271,7 @@ function redact_line(line, line_no) {
         # not end the one-line lookahead for the value line.
         if ($0 ~ /^ *#/ || $0 ~ /^ *$/) { print; return }
         env_await_value = 0
-        if ($0 ~ /^[[:space:]]+value: ./ && (tolower(env_name) ~ \
-            /(password|passwd|passphrase|secret|token|credential|api_key|private_key|access_key|auth|session|dsn|conn(ection)?_?str)/ \
-            || tolower(env_name) ~ /(^|_)key$/ \
+        if ($0 ~ /^[[:space:]]+value: ./ && (credential_name(env_name) \
             || tolower(env_name) ~ /(url|host|endpoint|addr)/ \
             || tolower(env_name) ~ /(^|_)(svc|service)(_|$)/ \
             || tolower(env_name) ~ /(^|_)(tenant|tenants)(_|$)/ \
@@ -344,6 +357,25 @@ function redact_line(line, line_no) {
         config_key = $0
         sub(/:.*/, "", config_key)
         if (tolower(config_key) ~ /(url|host|addr|endpoint)/) {
+            if ($0 ~ /: [|>]/) {
+                match($0, /^ */)
+                config_block_indent = RLENGTH
+                config_block = 1
+            }
+            sub(/: .*/, ": <redacted>")
+        }
+    }
+    # Credential-shaped ConfigMap data entries are masked for the same
+    # reason env entries are: a caller values overlay can render a
+    # ConfigMap (for example through the NetBox chart extraDeploy) whose
+    # data carries a token or password, and the dry run prints whole
+    # manifests. The document pre-scan identifies ConfigMaps even when a
+    # data key precedes its identity, and a block-scalar body is dropped
+    # with its key so only the key and the rest of the data stay readable.
+    if (configmap_data && $0 ~ /^  [^ :][^:]*: ./) {
+        config_key = $0
+        sub(/:.*/, "", config_key)
+        if (credential_name(config_key)) {
             if ($0 ~ /: [|>]/) {
                 match($0, /^ */)
                 config_block_indent = RLENGTH

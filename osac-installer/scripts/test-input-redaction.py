@@ -28,10 +28,11 @@ class InputRedactionTests(unittest.TestCase):
         self.username = secrets.token_hex(8)
         self.hostname = f"{secrets.token_hex(12)}.internal.invalid"
         self.url = f"https://{self.username}:{self.password}@{self.hostname}"
+        self.token = secrets.token_hex(24)
 
     def assert_private(self, output):
         """Fail when any canary value appears in the given output."""
-        for value in (self.username, self.password, self.hostname):
+        for value in (self.username, self.password, self.hostname, self.token):
             self.assertFalse(value in output, "sensitive canary reached output")
 
     def redact(self, manifest):
@@ -66,6 +67,31 @@ class InputRedactionTests(unittest.TestCase):
                     manifest += "---\ndata:\n  mode: foreground\nkind: ConfigMap\nmetadata:\n  name: readable\n"
                     self.redact(manifest)
 
+    def test_credential_configmap_values_are_masked(self):
+        """Check credential-shaped ConfigMap values, including block scalars."""
+        manifest = (
+            "kind: ConfigMap\nmetadata:\n  name: netbox-integration\n"
+            f"data:\n  apiToken: |\n    {self.token}\n"
+            f"  adminPassword: {self.password}\n"
+            f"  SECRET_KEY: {self.password}\n"
+            "  plainValue: readable\n"
+            "---\n"
+            "data:\n"
+            f"  apiToken: {self.token}\n"
+            "  plainValue: readable\n"
+            "kind: ConfigMap\nmetadata:\n  name: data-first\n"
+        )
+        result = subprocess.run(
+            [str(INSTALLER / "scripts/redact-secret-values.sh")],
+            input=manifest, text=True, capture_output=True, check=True,
+        )
+        self.assert_private(result.stdout + result.stderr)
+        self.assertIn("apiToken: <redacted>", result.stdout)
+        self.assertIn("adminPassword: <redacted>", result.stdout)
+        self.assertIn("SECRET_KEY: <redacted>", result.stdout)
+        self.assertEqual(result.stdout.count("plainValue: readable"), 2)
+        self.assertNotIn("apiToken: |", result.stdout)
+
     def test_netbox_extra_deploy_real_render(self):
         """Check a real render whose extraDeploy payload precedes its identity."""
         for data_first in (False, True):
@@ -75,6 +101,12 @@ class InputRedactionTests(unittest.TestCase):
                     identity = {"apiVersion": "v1", "kind": kind, "metadata": {"name": name}}
                     payload = {"data": {"payload": self.password}}
                     resources.append({**payload, **identity} if data_first else {**identity, **payload})
+                resources.append({
+                    "apiVersion": "v1",
+                    "kind": "ConfigMap",
+                    "metadata": {"name": "netbox-integration"},
+                    "data": {"apiToken": f"{self.token}\n", "plainValue": "readable"},
+                })
                 values = self.directory / "extra.json"
                 values.write_text(json.dumps({"netbox": {"extraDeploy": resources}}))
                 result = subprocess.run(
@@ -86,6 +118,7 @@ class InputRedactionTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode, 0, "real infra render failed")
                 self.assertTrue(self.password in result.stdout, "extraDeploy fixture was not rendered")
+                self.assertTrue(self.token in result.stdout, "credential ConfigMap fixture was not rendered")
                 self.redact(result.stdout + "\n---\nkind: ConfigMap\nmetadata:\n  name: readable\ndata:\n  mode: foreground\n")
 
     def test_comments_quoted_kinds_and_document_boundaries(self):
@@ -197,6 +230,43 @@ class InputRedactionTests(unittest.TestCase):
                 self.assertIn("offline OSAC chart", result.stderr)
                 self.assertIn("no cluster changes", result.stderr)
                 self.assertEqual(len(calls.read_text().splitlines()), 2 if retry else 1)
+
+    def test_offline_render_error_reports_schema_path_without_values(self):
+        """Check unmatched schema failures name the path and drop the value."""
+        cases = (
+            (
+                "Error: values don't meet the specifications of the schema(s)"
+                " in the following chart(s):\n"
+                f"osac:\n- aap.bootstrap.backoffLimit: {self.password}\n",
+                "aap.bootstrap.backoffLimit: violates the values schema",
+            ),
+            (
+                "Error: values don't meet the specifications of the schema(s)"
+                " in the following chart(s):\n"
+                f"osac:\n- at '/global/fulfillmentTrust': {self.url}\n",
+                "global/fulfillmentTrust: violates the values schema",
+            ),
+        )
+        for message, expected in cases:
+            with self.subTest(expected=expected):
+                result = subprocess.run(
+                    ["bash", "-c", 'source "$1"; offline_render_error "$2"',
+                     "bash", str(INSTALLER / "scripts/lib.sh"), message],
+                    text=True, capture_output=True,
+                )
+                self.assertEqual(result.returncode, 0)
+                self.assert_private(result.stdout + result.stderr)
+                self.assertIn("offline OSAC chart", result.stderr)
+                self.assertIn(expected, result.stderr)
+        # The three specific diagnostics still win over the path fallback.
+        specific = subprocess.run(
+            ["bash", "-c", 'source "$1"; offline_render_error "$2"',
+             "bash", str(INSTALLER / "scripts/lib.sh"),
+             "bmf.netbox.tokenValue: Invalid type: got number, want string"],
+            text=True, capture_output=True,
+        )
+        self.assertIn("bmf.netbox.tokenValue: Invalid type; expected string",
+                      specific.stderr)
 
     def test_make_gate_real_aap_error_is_private(self):
         """Check the real AAP render failure through the make gate stays private."""

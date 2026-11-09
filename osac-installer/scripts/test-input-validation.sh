@@ -402,6 +402,32 @@ grep -q 'NS must be a lowercase DNS label' "${TMP_DIR}/nsung.err" \
   || fail "ns-injection-ungated: the failure did not name the namespace rule"
 assert_prevalidation_commands ns-injection-ungated
 
+# Kubeconfig paths are caller-supplied data too: REMOTE_KUBECONFIG is
+# frozen verbatim before the parse-time remote conditionals and
+# REMOTE_CLUSTER_HELM_ARGS expand, and KUBECONFIG is frozen under an origin
+# guard before the kind-file default expands it. Both reach recipes through
+# the exported environment. The sentinel files prove no $(shell ...) side
+# effect ran at parse or export time; the values stay valid inputs.
+echo "checking kubeconfig-injection-make (Make expressions in kubeconfigs stay data)"
+: >"${LOG}"
+if MOCK_LOG="${LOG}" PATH="${STUB_BIN}:${PATH}" \
+  make -C "${SANDBOX}" --no-print-directory validate-inputs \
+  PLATFORM=openshift PROFILE=vmaas-ci NS=osac \
+  "KUBECONFIG=/tmp/hub-$(date +%s)-$$\$(shell touch ${ns_sentinel}-kubeconfig)" \
+  "REMOTE_KUBECONFIG=/tmp/remote-$(date +%s)-$$\$(shell touch ${ns_sentinel}-remote-kubeconfig)" \
+  >"${TMP_DIR}/kubeconfig.out" 2>"${TMP_DIR}/kubeconfig.err"; then
+  :
+else
+  fail "kubeconfig-injection-make: the gate rejected valid kubeconfig paths"
+fi
+[ ! -e "${ns_sentinel}-kubeconfig" ] \
+  || fail "kubeconfig-injection-make: a Make expression in KUBECONFIG executed"
+[ ! -e "${ns_sentinel}-remote-kubeconfig" ] \
+  || fail "kubeconfig-injection-make: a Make expression in REMOTE_KUBECONFIG executed"
+grep -q 'Installer input validation passed' "${TMP_DIR}/kubeconfig.out" \
+  || fail "kubeconfig-injection-make: the gate did not complete"
+assert_prevalidation_commands kubeconfig-injection-make
+
 # Caller-supplied Helm args are data, never command text: EXTRA_HELM_ARGS
 # is frozen verbatim (no Make expression in it expands, including at
 # export time) and reaches recipes through the environment, so both Make
@@ -1241,6 +1267,48 @@ grep -q 'name: osac-infra-evpn-config' "${TMP_DIR}/dryrun-evpn-fabric-rendered.y
   || fail "dry-run-evpn-fabric-redaction: the EVPN config ConfigMap is missing"
 grep -q 'nodes.txt: <redacted>' "${TMP_DIR}/dryrun-evpn-fabric-rendered.yaml" \
   || fail "dry-run-evpn-fabric-redaction: the node list was not masked"
+
+# A values overlay can render a ConfigMap through the NetBox chart's
+# extraDeploy; a credential-shaped data key there is plain text in the
+# dry-run output like an env value, and a block-scalar body (a multi-line
+# token or PEM) must be dropped with the key. The plain entry stays
+# readable so the rendered configuration remains reviewable.
+echo "checking dry-run-configmap-credential-redaction (overlay ConfigMap secrets stay out)"
+cm_token="configmap-token-$(date +%s)-$$"
+cm_password="configmap-password-$(date +%s)-$$"
+cat >"${TMP_DIR}/dryrun-configmap-credential.yaml" <<CM_EOF
+netbox:
+  extraDeploy:
+    - apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: netbox-integration
+      data:
+        apiToken: |
+          ${cm_token}
+        adminPassword: ${cm_password}
+        plainValue: readable
+CM_EOF
+if ! helm template osac-infra "${INFRA_CHART_DIR}" \
+    --namespace osac-infra \
+    --values "${INSTALLER_DIR}/values/bmaas-ci/infra.yaml" \
+    --values "${INSTALLER_DIR}/values/bmaas-netbox-ci/infra.yaml" \
+    -f "${TMP_DIR}/dryrun-configmap-credential.yaml" \
+    --set osacNamespace=osac \
+    | "${SCRIPT_DIR}/redact-secret-values.sh" \
+    >"${TMP_DIR}/dryrun-configmap-rendered.yaml" 2>>"${netbox_gate_err}"; then
+  fail "dry-run-configmap-credential-redaction: the osac-infra render failed"
+fi
+grep -Fq "${cm_token}" "${TMP_DIR}/dryrun-configmap-rendered.yaml" \
+  && fail "dry-run-configmap-credential-redaction: a block-scalar ConfigMap token survived"
+grep -Fq "${cm_password}" "${TMP_DIR}/dryrun-configmap-rendered.yaml" \
+  && fail "dry-run-configmap-credential-redaction: a ConfigMap password survived"
+grep -q 'name: netbox-integration' "${TMP_DIR}/dryrun-configmap-rendered.yaml" \
+  || fail "dry-run-configmap-credential-redaction: the overlay ConfigMap is missing"
+grep -q 'apiToken: <redacted>' "${TMP_DIR}/dryrun-configmap-rendered.yaml" \
+  || fail "dry-run-configmap-credential-redaction: the ConfigMap token was not masked"
+grep -q 'plainValue: readable' "${TMP_DIR}/dryrun-configmap-rendered.yaml" \
+  || fail "dry-run-configmap-credential-redaction: the non-credential entry was masked"
 
 # Container env entries are a plain-text channel for credentials: callers
 # can inject passwords into workload specs through values overlays (for
