@@ -114,6 +114,41 @@ function flow_close(line, depth,    i, c, quote) {
     flow_depth = depth
     return 0
 }
+# Advances a flow-map scan over one line of a multi-line item, carrying the
+# brace depth in flow_depth and the quote state in flow_quote from the
+# previous line. A quoted scalar can wrap onto the following lines and its
+# closing quote must not be read as a new opening quote, so the quote state
+# is kept across lines. Returns the column of the brace that closes the
+# item, or 0 when the item continues on the next line.
+function flow_scan(line, depth,    i, c) {
+    for (i = 1; i <= length(line); i++) {
+        c = substr(line, i, 1)
+        if (flow_quote == "\"") {
+            # An escaped double quote does not end the scalar.
+            if (c == "\\") { i++; continue }
+            if (c == "\"") flow_quote = ""
+            continue
+        }
+        if (flow_quote == "\047") {
+            # A doubled single quote stands for one quote character and does
+            # not end the scalar.
+            if (c == "\047") {
+                if (substr(line, i + 1, 1) == "\047") { i++; continue }
+                flow_quote = ""
+            }
+            continue
+        }
+        if (c == "\"" || c == "\047") { flow_quote = c; continue }
+        if (c == "{") {
+            depth++
+        } else if (c == "}") {
+            depth--
+            if (depth == 0) { flow_depth = 0; flow_quote = ""; return i }
+        }
+    }
+    flow_depth = depth
+    return 0
+}
 # True when a data key or env variable name is credential-shaped: the
 # secret-bearing words, any KEY-suffixed name (SIGNING_KEY, ENCRYPTION_KEY,
 # signing-key, and the camelCase signingKey this chart family also uses),
@@ -398,19 +433,42 @@ function mark_role_secret_names(    i, j, rule_end, rule_indent, key_ind, res_se
 # but a values overlay can introduce arbitrary YAML (netbox.extraDeploy),
 # so the one-line lookahead in redact_line alone would miss a value written
 # before its name. Flow-style items (`- {name: X, value: Y}`) are marked
-# whole and masked in place, because name and value share the item line.
-function mark_env_secret_values(    i, j, end, ind, key_ind, name, sensitive) {
-    for (i = 1; i <= document_length; i++) env_secret[i] = 0
+# whole and masked in place, because name and value share the item line;
+# an item can wrap onto the following lines, so the item is joined before
+# the name is read and every line it spans is marked.
+function mark_env_secret_values(    i, j, end, ind, key_ind, name, sensitive, text) {
+    for (i = 1; i <= document_length; i++) {
+        env_secret[i] = 0
+        env_flow[i] = 0
+    }
     for (i = 1; i <= document_length; i++) {
         if (document[i] !~ /^[[:space:]]*- [^ ].*:/) continue
         if (document[i] ~ /^[[:space:]]*- \{/) {
-            if (!match(document[i], /(^|[{,[:space:]])name:[[:space:]]*("[^"]*"|\047[^\047]*\047|[^,}]*)/)) continue
-            name = substr(document[i], RSTART, RLENGTH)
+            # A flow item can wrap onto the following lines, putting the
+            # name on one line and the value on another, so the item is
+            # joined before the name is read. Every line of a sensitive
+            # item is marked, because the value can sit on any of them.
+            text = document[i]
+            end = i
+            flow_quote = ""
+            if (flow_scan(document[i], 0) == 0) {
+                for (j = i + 1; j <= document_length && j <= i + 100; j++) {
+                    text = text " " document[j]
+                    end = j
+                    if (flow_scan(document[j], flow_depth) != 0) break
+                }
+            }
+            if (!match(text, /(^|[{,[:space:]])name:[[:space:]]*("[^"]*"|\047[^\047]*\047|[^,}]*)/)) continue
+            name = substr(text, RSTART, RLENGTH)
             sub(/^.*name:[[:space:]]*/, "", name)
             gsub(/["\047]/, "", name)
             sub(/^[[:space:]]+/, "", name)
             sub(/[[:space:]]+$/, "", name)
-            if (sensitive_env_name(name)) env_secret[i] = 1
+            if (!sensitive_env_name(name)) continue
+            for (j = i; j <= end; j++) {
+                env_secret[j] = 1
+                env_flow[j] = 1
+            }
             continue
         }
         match(document[i], /^ */)
@@ -436,12 +494,13 @@ function mark_env_secret_values(    i, j, end, ind, key_ind, name, sensitive) {
         if (!sensitive) continue
         for (j = i; j <= end; j++) {
             if (key_indent(document[j]) != key_ind) continue
-            if (document[j] ~ /^[[:space:]]*(- )?value: /) env_secret[j] = 1
+            if (document[j] ~ /^[[:space:]]*(- )?value:([[:space:]]|$)/) env_secret[j] = 1
         }
     }
 }
 function flush_document(    index_line, metadata, name) {
     kind = ""; endpoint_configmap = 0; in_payload = 0; env_block = 0
+    env_flow_cont = 0
     config_block = 0; config_file_block = 0
     file_nested = 0; file_nested_indent = 0
     role_rn_block = 0; dns_block = 0
@@ -486,6 +545,19 @@ function redact_line(line, line_no) {
             payload_flow_depth = flow_depth
         }
         return
+    }
+    # A masked flow-style env value can wrap onto the following lines when
+    # its quoted scalar does not close on the value line; the wrapped part
+    # is masked up to the delimiter that closes the item, so no fragment of
+    # the value survives.
+    if (env_flow_cont) {
+        if (match($0, /[,}]/)) {
+            $0 = "<redacted>" substr($0, RSTART)
+            env_flow_cont = 0
+        } else {
+            $0 = "<redacted>"
+        }
+        print; return
     }
     if (kind == "Secret" && /^(data|stringData):[[:space:]]*(#.*)?$/) { in_payload = 1; print; return }
     # A Secret data/stringData value can also be a flow map on one line or
@@ -669,7 +741,7 @@ function redact_line(line, line_no) {
     # the item is block- or flow-style. A block-scalar value keeps its
     # body on deeper-indented lines, which are dropped with the value.
     if (env_secret[line_no]) {
-        if ($0 ~ /^[[:space:]]*- \{/) {
+        if ($0 ~ /^[[:space:]]*- \{/ || env_flow[line_no]) {
             # Flow item: keep the closing brace and any fields after the
             # value, and mask only the value scalar (quoted or plain). The
             # key needs a flow-key boundary so a sibling field such as
@@ -677,22 +749,29 @@ function redact_line(line, line_no) {
             # of the item counts as a boundary for a value key written
             # first. The scalar runs through its own closing quote, so an
             # escaped double quote or a doubled single quote cannot end
-            # the mask early and expose the rest of the value.
+            # the mask early and expose the rest of the value. A scalar
+            # that does not close on this line continues below and is
+            # masked there.
             if (match($0, /[{,[:space:]]value:[[:space:]]*/)) {
                 flow_head = substr($0, 1, RSTART + RLENGTH - 1)
                 flow_rest = substr($0, RSTART + RLENGTH)
                 flow_len = scalar_length(flow_rest, "^[^,}]*")
                 $0 = flow_head "<redacted>" substr(flow_rest, flow_len + 1)
+                if (substr(flow_rest, flow_len + 1) !~ /^[[:space:]]*[,}]/)
+                    env_flow_cont = 1
             }
-        } else if ($0 ~ /^[[:space:]]*(- )?value: /) {
-            if ($0 ~ /^[[:space:]]*(- )?value: [|>]/) {
-                # The key indent counts the item dash as structure, so a
-                # `- value: |` line does not swallow a sibling `name:` at
-                # the key indent as if it were part of the block body.
-                env_block_indent = key_indent($0)
-                env_block = 1
-            }
-            sub(/value: .*/, "value: <redacted>")
+        } else if ($0 ~ /^[[:space:]]*(- )?value:([[:space:]]|$)/) {
+            # A masked block value ends its line; an empty value puts the
+            # real value on the following lines, and a plain or quoted
+            # scalar can wrap onto deeper-indented lines, so every line
+            # deeper than the key belongs to the value until a line at or
+            # shallower than the key returns. The key indent counts the
+            # item dash as structure, so a `- value:` line does not
+            # swallow a sibling `name:` at the key indent as if it were
+            # part of the value.
+            env_block_indent = key_indent($0)
+            env_block = 1
+            sub(/value:.*/, "value: <redacted>")
         }
     }
     # RBAC rules that target Secrets name the Secret in resourceNames, and

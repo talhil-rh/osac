@@ -314,6 +314,62 @@ class InputRedactionTests(unittest.TestCase):
         self.assertIn("name: DB_PASSWORD", result.stdout)
         self.assertNotIn("block-body-must-not-print", result.stdout)
 
+    def test_env_values_wrapping_and_empty_are_masked(self):
+        """Check wrapped, empty and multi-line-flow env values are masked."""
+        manifest = (
+            "kind: Deployment\nmetadata:\n  name: web\n"
+            "spec:\n  containers:\n    - name: app\n      env:\n"
+            "        - {name: API_TOKEN,\n"
+            f"           value: {self.token}}}\n"
+            "        - {value: " + self.token + ",\n"
+            "           name: DB_PASSWORD}\n"
+            "        - name: SESSION_TOKEN\n"
+            "          value:\n"
+            f"            {self.token}\n"
+            "        - name: API_TOKEN\n"
+            f"          value: {self.token}\n"
+            "            wrapped-tail\n"
+            "        - name: SESSION_TOKEN\n"
+            f'          value: "{self.token}\n'
+            '            quoted-tail"\n'
+            "        - {name: SESSION_TOKEN,\n"
+            f'           value: "{self.token}\n'
+            '           flow-tail"}\n'
+            "        - {name: PLAIN_SETTING,\n"
+            '           value: "readable\n'
+            '           readable-tail"}\n'
+            "        - name: PLAIN_SETTING\n"
+            "          value: readable-plain\n"
+        )
+        result = subprocess.run(
+            [str(INSTALLER / "scripts/redact-secret-values.sh")],
+            input=manifest, text=True, capture_output=True, check=True,
+        )
+        self.assert_private(result.stdout + result.stderr)
+        for tail in ("wrapped-tail", "quoted-tail", "flow-tail"):
+            self.assertNotIn(tail, result.stdout)
+        self.assertEqual(result.stdout.count("value: <redacted>"), 6)
+        self.assertIn("readable", result.stdout)
+        self.assertIn("readable-tail", result.stdout)
+        self.assertIn("value: readable-plain", result.stdout)
+
+    def test_offline_render_error_hides_set_file_path(self):
+        """Check a --set-file failure does not echo the file path."""
+        path = f"/srv/{self.token}/ca.pem"
+        message = (
+            "Error: failed parsing --set-file data: open "
+            f"{path}: no such file or directory\n"
+        )
+        result = subprocess.run(
+            ["bash", "-c", 'source "$1"; offline_render_error "$2"',
+             "bash", str(INSTALLER / "scripts/lib.sh"), message],
+            text=True, capture_output=True,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assert_private(result.stdout + result.stderr)
+        self.assertIn("--set-file input could not be read", result.stderr)
+        self.assertNotIn(path, result.stdout + result.stderr)
+
     def test_netbox_extra_deploy_real_render(self):
         """Check a real render whose extraDeploy payload precedes its identity."""
         for data_first in (False, True):

@@ -215,6 +215,13 @@ offline_render_error() {
                         if (loc ~ /^[A-Za-z0-9_.\/-]+:[0-9]+:[0-9]+$/)
                             print "template check failed in " loc \
                                 " (message suppressed)"
+                    } else if ($0 ~ /^Error: failed parsing --set-file data:/) {
+                        # Helm names the file it could not read; the path
+                        # can carry customer data, so only the argument is
+                        # reported.
+                        print "--set-file input could not be read; check" \
+                            " OIDC_IDP_CA_FILE and other --set-file" \
+                            " arguments"
                     } else if ($0 ~ /^Error: values don/) {
                         schema = 1
                     }
