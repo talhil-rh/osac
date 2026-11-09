@@ -1344,6 +1344,8 @@ cm_file_key="configmap-file-key-$(date +%s)-$$"
 cm_file_auth="configmap-file-auth-$(date +%s)-$$"
 cm_file_uri="configmap-file-uri-$(date +%s)-$$"
 cm_file_query="configmap-file-query-$(date +%s)-$$"
+cm_file_embedded="configmap-file-embedded-$(date +%s)-$$"
+cm_file_host="configmap-file-host-$(date +%s)-$$"
 cm_file_json="configmap-file-json-$(date +%s)-$$"
 cm_file_json_escaped="configmap-file-json-escaped-$(date +%s)-$$"
 cm_file_json_backslash="configmap-file-json-backslash-$(date +%s)-$$"
@@ -1371,6 +1373,10 @@ netbox:
           uri = postgres://user:${cm_file_uri}@db/app
           api = https://netbox.example/api/?token=${cm_file_query}&author=readable
           paged = https://netbox.example/api?page=2&limit=10
+          options = user=dbuser password=${cm_file_embedded} & tls=on
+          server = https://${cm_file_host}.apps.example.com/api
+          peer = ${cm_file_host}.svc.cluster.local
+          connection: server=${cm_file_host}.svc.cluster.local port=5432
           {"password":"${cm_file_json}"}
           {"token":"pre\"${cm_file_json_escaped}\\\\tail"}
           {"pattern":"C:\\\\","password":"${cm_file_json_backslash}"}
@@ -1407,6 +1413,10 @@ grep -Fq "${cm_file_uri}" "${TMP_DIR}/dryrun-configmap-file.out" \
   && fail "dry-run-configmap-file-redaction: URL userinfo survived"
 grep -Fq "${cm_file_query}" "${TMP_DIR}/dryrun-configmap-file.out" \
   && fail "dry-run-configmap-file-redaction: a URL query credential survived"
+grep -Fq "${cm_file_embedded}" "${TMP_DIR}/dryrun-configmap-file.out" \
+  && fail "dry-run-configmap-file-redaction: an embedded credential survived"
+grep -Fq "${cm_file_host}" "${TMP_DIR}/dryrun-configmap-file.out" \
+  && fail "dry-run-configmap-file-redaction: an internal hostname survived"
 grep -Fq "${cm_file_json}" "${TMP_DIR}/dryrun-configmap-file.out" \
   && fail "dry-run-configmap-file-redaction: an inline JSON value survived"
 grep -Fq "${cm_file_json_escaped}" "${TMP_DIR}/dryrun-configmap-file.out" \
@@ -1429,8 +1439,16 @@ grep -q 'postgres://<redacted>@db/app' "${TMP_DIR}/dryrun-configmap-file.out" \
   || fail "dry-run-configmap-file-redaction: URL userinfo was not masked"
 grep -Fq '?token=<redacted>&author=readable' "${TMP_DIR}/dryrun-configmap-file.out" \
   || fail "dry-run-configmap-file-redaction: a URL query credential was not masked"
-grep -Fq 'paged = https://netbox.example/api?page=2&limit=10' "${TMP_DIR}/dryrun-configmap-file.out" \
+grep -Fq 'paged = https://<redacted>/api?page=2&limit=10' "${TMP_DIR}/dryrun-configmap-file.out" \
   || fail "dry-run-configmap-file-redaction: a non-credential query was masked"
+grep -Fq 'user=dbuser password=<redacted> & tls=on' "${TMP_DIR}/dryrun-configmap-file.out" \
+  || fail "dry-run-configmap-file-redaction: an embedded credential was not masked"
+grep -Fq 'server = <redacted>' "${TMP_DIR}/dryrun-configmap-file.out" \
+  || fail "dry-run-configmap-file-redaction: an endpoint hostname was not masked"
+grep -Fq 'peer = <redacted>' "${TMP_DIR}/dryrun-configmap-file.out" \
+  || fail "dry-run-configmap-file-redaction: an internal hostname was not masked"
+grep -Fq 'connection: server=<redacted> port=5432' "${TMP_DIR}/dryrun-configmap-file.out" \
+  || fail "dry-run-configmap-file-redaction: an embedded internal hostname was not masked"
 grep -q '{"password":"<redacted>"}' "${TMP_DIR}/dryrun-configmap-file.out" \
   || fail "dry-run-configmap-file-redaction: an inline JSON field was not masked"
 grep -q '{"token":"<redacted>"}' "${TMP_DIR}/dryrun-configmap-file.out" \

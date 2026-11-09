@@ -180,10 +180,32 @@ offline_render_error() {
             # than the first line of output. Nothing is read past the
             # first schema item: later items cannot be told apart from
             # such echoed text. A failure without a recognizable marker
-            # keeps the generic line alone. The fabricDomainInventory
-            # entry key is customer-supplied (a hostname) and can appear
-            # in the path, so that path is printed without the entry key.
+            # keeps the generic line alone. Open schema maps carry
+            # customer-supplied entry keys (a fabricDomainInventory
+            # hostname, a vendorControllers or networkManagers
+            # identifier, a workersJoiningByInstanceType name), and those
+            # keys can appear in the path, so such a path is printed
+            # without the entry key.
             printf '%s\n' "$1" | LC_ALL=C awk -v q="'" '
+                # Dotted name of the open values-schema map the path
+                # enters, or "" when it enters none. The segment after the
+                # map name is a customer-supplied key; Helm 4 separates
+                # path segments with a slash and Helm 3 with a dot.
+                function open_map(path,    slash) {
+                    slash = path
+                    gsub(/\//, ".", slash)
+                    if (slash ~ /^operator\.fabricDomainInventory\./)
+                        return "operator.fabricDomainInventory"
+                    if (slash ~ /^operator\.vendorControllers\./)
+                        return "operator.vendorControllers"
+                    if (slash ~ /^operator\.networkManagers\.fabricManagers\./)
+                        return "operator.networkManagers.fabricManagers"
+                    if (slash ~ /^operator\.networkManagers\.k8sManagers\./)
+                        return "operator.networkManagers.k8sManagers"
+                    if (slash ~ /^operator\.stall\.workersJoiningByInstanceType\./)
+                        return "operator.stall.workersJoiningByInstanceType"
+                    return ""
+                }
                 !seen && /^Error: / {
                     seen = 1
                     if ($0 ~ /^Error: execution error at \(/) {
@@ -200,21 +222,24 @@ offline_render_error() {
                 }
                 schema && !done {
                     done = 1
-                    if ($0 ~ ("^- at " q "/operator/fabricDomainInventory/") ||
-                        $0 ~ /^- operator\.fabricDomainInventory\./) {
-                        print "operator.fabricDomainInventory:" \
-                            " violates the values schema"
-                    } else if (match($0, "^- at " q "[^" q "]*" q ":")) {
+                    if (match($0, "^- at " q "[^" q "]*" q ":")) {
                         path = substr($0, RSTART + 6, RLENGTH - 8)
                         # Helm 4 writes the path with a leading slash; drop
                         # it so both schema error formats name the field the
                         # same way.
                         sub(/^\//, "", path)
-                        if (path ~ /^[A-Za-z0-9_.~\/-]+$/)
+                        map = open_map(path)
+                        if (map != "")
+                            print map ": violates the values schema"
+                        else if (path ~ /^[A-Za-z0-9_.~\/-]+$/)
                             print path ": violates the values schema"
                     } else if (match($0, "^- [A-Za-z0-9_.()-]+: ")) {
-                        print substr($0, RSTART + 2, RLENGTH - 4) \
-                            ": violates the values schema"
+                        path = substr($0, RSTART + 2, RLENGTH - 4)
+                        map = open_map(path)
+                        if (map != "")
+                            print map ": violates the values schema"
+                        else
+                            print path ": violates the values schema"
                     } else if ($0 !~ /^- /) {
                         # Only the chart-name line precedes the first item;
                         # any other non-item line means the schema block

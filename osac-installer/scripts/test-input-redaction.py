@@ -125,6 +125,10 @@ class InputRedactionTests(unittest.TestCase):
             f"    endpoint = https://netbox.example/api"
             f"?api_key={self.password}\n"
             "    paged = https://netbox.example/api?page=2&limit=10\n"
+            f"    options = user=dbuser password={self.password} & tls=on\n"
+            f"    connection: server={self.hostname} port=5432\n"
+            f"    server = https://{self.hostname}/api\n"
+            f"    peer = node1.{self.hostname}\n"
             f'    {{"password":"{self.token}"}}\n'
             "    key: readable-key\n"
             "    tls.key: /etc/tls/tls.key\n"
@@ -160,12 +164,16 @@ class InputRedactionTests(unittest.TestCase):
         self.assertIn("Authorization: <redacted>", result.stdout)
         self.assertIn("postgres://<redacted>@db/app", result.stdout)
         self.assertIn("?token=<redacted>&author=readable", result.stdout)
-        self.assertIn("?api_key=<redacted>", result.stdout)
+        self.assertIn("endpoint = <redacted>", result.stdout)
+        self.assertIn("user=dbuser password=<redacted> & tls=on", result.stdout)
+        self.assertIn("connection: server=<redacted> port=5432", result.stdout)
+        self.assertIn("server = <redacted>", result.stdout)
+        self.assertIn("peer = <redacted>", result.stdout)
         self.assertIn('{"password":"<redacted>"}', result.stdout)
         for readable in ("host = netbox-db", "author = readable", "ttl = 300",
                          "oauth: oidc", "log_level=debug",
                          "key: readable-key", "tls.key: /etc/tls/tls.key",
-                         "paged = https://netbox.example/api"
+                         "paged = https://<redacted>/api"
                          "?page=2&limit=10"):
             self.assertIn(readable, result.stdout)
 
@@ -270,6 +278,10 @@ class InputRedactionTests(unittest.TestCase):
             f"        - {{username: plain, name: API_TOKEN, value: {self.token}}}\n"
             f"        - {{subvalue: plain, name: API_TOKEN, value: {self.token}}}\n"
             "        - {name: PLAIN_SETTING, value: readable-flow}\n"
+            f'        - {{name: DB_PASSWORD, value: "abc\\"{self.token},tail",'
+            " other: x}\n"
+            f"        - {{name: API_TOKEN, value: 'abc''{self.token},tail',"
+            " other: y}\n"
             f"        - name: BIND_PASSWORD\n          value: {self.token}\n"
             "        - value: |\n"
             "            block-body-must-not-print\n"
@@ -280,7 +292,7 @@ class InputRedactionTests(unittest.TestCase):
             input=manifest, text=True, capture_output=True, check=True,
         )
         self.assert_private(result.stdout + result.stderr)
-        self.assertEqual(result.stdout.count("value: <redacted>"), 7)
+        self.assertEqual(result.stdout.count("value: <redacted>"), 9)
         self.assertIn(
             "{name: PLAIN_SETTING, value: readable-flow}", result.stdout
         )
@@ -619,6 +631,36 @@ class InputRedactionTests(unittest.TestCase):
                 f"osac:\n- operator.fabricDomainInventory.{self.hostname}:"
                 " must be non-empty\n",
                 "operator.fabricDomainInventory: violates the values schema",
+            ),
+            (
+                "Error: values don't meet the specifications of the schema(s)"
+                " in the following chart(s):\n"
+                f"osac:\n- operator.vendorControllers.{self.hostname}:"
+                " must be non-empty\n",
+                "operator.vendorControllers: violates the values schema",
+            ),
+            (
+                "Error: values don't meet the specifications of the schema(s)"
+                " in the following chart(s):\n"
+                "osac:\n- at '/operator/vendorControllers/"
+                f"{self.hostname}/endpoint': got string, want integer\n",
+                "operator.vendorControllers: violates the values schema",
+            ),
+            (
+                "Error: values don't meet the specifications of the schema(s)"
+                " in the following chart(s):\n"
+                "osac:\n- at '/operator/networkManagers/k8sManagers/"
+                f"{self.hostname}/endpoint': got string, want integer\n",
+                "operator.networkManagers.k8sManagers: violates the"
+                " values schema",
+            ),
+            (
+                "Error: values don't meet the specifications of the schema(s)"
+                " in the following chart(s):\n"
+                "osac:\n- operator.stall.workersJoiningByInstanceType."
+                f"{self.hostname}: Invalid type\n",
+                "operator.stall.workersJoiningByInstanceType: violates the"
+                " values schema",
             ),
         )
         for message, expected in cases:

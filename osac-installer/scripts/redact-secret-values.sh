@@ -47,8 +47,11 @@
 # are dropped with their value line; a block-scalar ConfigMap value under
 # any other key is a configuration-file payload, and a credential
 # assignment inside it (`password: x`, `token = x`, `"client_secret": x`,
-# also behind an `export ` or `- ` prefix) is masked in place so the rest
-# of the file stays readable; the same payload collapsed onto one line
+# also behind an `export ` or `- ` prefix or later in the line) is masked
+# in place so the rest of the file stays readable; a URL host, an
+# internal-shaped hostname (`.svc`, `.internal`, `.local` labels), and a
+# credential in a URL query parameter are masked in place for the same
+# reason. The same payload collapsed onto one line
 # (`app.conf: host=db password=x`) is masked as a whole, because that
 # line has no other content to keep. Resource
 # structure, Secret/ConfigMap names and keys, and every other value stay
@@ -213,6 +216,88 @@ function mask_query_credentials(text,    out, rest, found, key) {
         rest = substr(rest, RSTART + RLENGTH)
         if (credential_file_key(key) && match(rest, /^[^&[:space:]]*/))
             rest = "<redacted>" substr(rest, RLENGTH + 1)
+    }
+    return out rest
+}
+# Length of a scalar at the start of text: a double-quoted scalar through
+# its closing quote (a backslash escapes the next character), a
+# single-quoted scalar through its closing quote (a doubled quote is one
+# character), or a plain scalar matching the given regular expression.
+function scalar_length(text, plain,    i, c, quote) {
+    quote = substr(text, 1, 1)
+    if (quote == "\"") {
+        for (i = 2; i <= length(text); i++) {
+            c = substr(text, i, 1)
+            if (c == "\\") {
+                i++
+            } else if (c == "\"") {
+                return i
+            }
+        }
+        return length(text)
+    }
+    if (quote == "\047") {
+        for (i = 2; i <= length(text); i++) {
+            if (substr(text, i, 1) != "\047") continue
+            if (substr(text, i + 1, 1) == "\047") {
+                i++
+            } else {
+                return i
+            }
+        }
+        return length(text)
+    }
+    if (match(text, plain)) return RLENGTH
+    return 0
+}
+# Masks internal-shaped hostnames (`.svc`, `.internal` and `.local`
+# suffixes, including `.svc.cluster.local`) wherever they appear on a
+# configuration-file line, keeping the port and the rest of the line.
+function mask_internal_hostnames(text,    out, rest) {
+    out = ""
+    rest = text
+    while (match(rest, /[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)*\.(svc|internal|local)(\.[A-Za-z0-9-]+)*([.:][0-9]+)?/)) {
+        if (RSTART > 1 && substr(rest, RSTART - 1, 1) ~ /[A-Za-z0-9.-]/) {
+            out = out substr(rest, 1, RSTART)
+            rest = substr(rest, RSTART + 1)
+            continue
+        }
+        out = out substr(rest, 1, RSTART - 1) "<redacted>"
+        rest = substr(rest, RSTART + RLENGTH)
+    }
+    return out rest
+}
+# The host of a URL is endpoint data in a configuration-file payload, so
+# it is masked in full; the scheme and any path stay readable.
+function mask_url_hosts(text) {
+    gsub(/:\/\/[^\/[:space:]@]+/, "://<redacted>", text)
+    return text
+}
+# Credential assignments embedded anywhere in a configuration-file line
+# (`options = user=x password=y`) are masked in place, keeping the key
+# and the rest of the line readable. A quoted value is masked through its
+# closing quote, so a separator inside it cannot expose the suffix.
+function mask_embedded_credentials(text,    out, rest, found, key, n, quote) {
+    out = ""
+    rest = text
+    while (match(rest, /(^|[[:space:];,&?{])["\047]?[A-Za-z0-9_.-]+["\047]?[[:space:]]*[:=][[:space:]]*/)) {
+        found = substr(rest, RSTART, RLENGTH)
+        key = found
+        sub(/^[^A-Za-z0-9_.-]*/, "", key)
+        sub(/["\047]?[[:space:]]*[:=][[:space:]]*$/, "", key)
+        out = out substr(rest, 1, RSTART + RLENGTH - 1)
+        rest = substr(rest, RSTART + RLENGTH)
+        if (credential_file_key(key)) {
+            n = scalar_length(rest, "^[^[:space:];,&}]*")
+            quote = substr(rest, 1, 1)
+            if (quote == "\"" || quote == "\047") {
+                # Keep the quotes so an inline JSON object keeps its shape;
+                # only the content between them is masked.
+                rest = quote "<redacted>" quote substr(rest, n + 1)
+            } else {
+                rest = "<redacted>" substr(rest, n + 1)
+            }
+        }
     }
     return out rest
 }
@@ -477,16 +562,30 @@ function redact_line(line, line_no) {
                         }
                         file_body = substr(file_body, 1, cut) "<redacted>"
                     }
+                } else if (tolower(file_key) ~ /(^|[_.-])(host|hostname|server|addr|address|endpoint|broker|peer|node)([_.-]|$)/) {
+                    # An endpoint-shaped key in a file line carries a
+                    # hostname; a dotted or port-bearing value is a host or
+                    # address, while a bare service name
+                    # (`host = netbox-db`) stays readable.
+                    if (match(file_body, /[:=][[:space:]]*/)) {
+                        cut = RSTART + RLENGTH - 1
+                        if (substr(file_body, cut + 1) ~ /[.:]/)
+                            file_body = substr(file_body, 1, cut) "<redacted>"
+                    }
                 }
             }
             # Credentials embedded as URL userinfo are masked whatever
             # the key is, because a neutral key such as uri can still
             # carry a password in a connection string.
             gsub(/:\/\/[^\/[:space:]@]+@/, "://<redacted>@", file_body)
-            # A credential can also ride in a URL query parameter on a
-            # file line whose own key is neutral
-            # (`api = https://host/api?token=x`), which the rules above
-            # do not see.
+            # The same line can carry endpoint data the line-start rule
+            # above does not see: a URL host, an internal-shaped hostname,
+            # an embedded credential assignment, or a credential in a URL
+            # query parameter. Each is masked in place so the rest of the
+            # file stays readable.
+            file_body = mask_url_hosts(file_body)
+            file_body = mask_internal_hostnames(file_body)
+            file_body = mask_embedded_credentials(file_body)
             file_body = mask_query_credentials(file_body)
             # An inline JSON object line has no leading key for the rule
             # above; its credential-shaped fields are masked in place.
@@ -556,9 +655,14 @@ function redact_line(line, line_no) {
             # key needs a flow-key boundary so a sibling field such as
             # `subvalue:` cannot shadow the real value; the opening brace
             # of the item counts as a boundary for a value key written
-            # first.
-            if (match($0, /[{,[:space:]]value:[[:space:]]*("[^"]*"|\047[^\047]*\047|[^,}]*)/)) {
-                $0 = substr($0, 1, RSTART) "value: <redacted>" substr($0, RSTART + RLENGTH)
+            # first. The scalar runs through its own closing quote, so an
+            # escaped double quote or a doubled single quote cannot end
+            # the mask early and expose the rest of the value.
+            if (match($0, /[{,[:space:]]value:[[:space:]]*/)) {
+                flow_head = substr($0, 1, RSTART + RLENGTH - 1)
+                flow_rest = substr($0, RSTART + RLENGTH)
+                flow_len = scalar_length(flow_rest, "^[^,}]*")
+                $0 = flow_head "<redacted>" substr(flow_rest, flow_len + 1)
             }
         } else if ($0 ~ /^[[:space:]]*(- )?value: /) {
             if ($0 ~ /^[[:space:]]*(- )?value: [|>]/) {
