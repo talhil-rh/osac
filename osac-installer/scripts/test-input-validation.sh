@@ -494,9 +494,10 @@ grep -q -- '-f values/dev/infra.yaml; touch' "${LOG}" \
 assert_prevalidation_commands infra-values-injection
 
 # The dry run prints rendered manifests to the terminal and to collected
-# CI logs, so every dry-run render is piped through the Secret-payload
-# redactor; an unpiped render could leak credentials supplied through a
-# values overlay.
+# CI logs, so every dry-run render goes through the redacting wrapper: it
+# masks stdout and sanitizes Helm diagnostics, which can echo a rejected
+# customer value (Helm 3.22 and later name the value in values-schema
+# errors). A render outside the wrapper could leak either stream.
 echo "checking dry-run-redaction wiring (every dry-run render is redacted)"
 for dry_platform in kind openshift; do
   dry_plan="${TMP_DIR}/dryrun-${dry_platform}.plan"
@@ -506,13 +507,14 @@ for dry_platform in kind openshift; do
     DRY_RUN_CLUSTER_DOMAIN=apps.example.com DRY_RUN_OCP_VERSION=4.22 \
     >"${dry_plan}" 2>/dev/null \
     || fail "make -n install-dry-run (${dry_platform}) failed"
-  dry_renders=$(join_continuations <"${dry_plan}" | grep -c 'helm template')
-  dry_redacted=$(join_continuations <"${dry_plan}" | grep 'helm template' \
-    | grep -c 'redact-secret-values')
+  dry_renders=$(join_continuations <"${dry_plan}" \
+    | grep -c 'scripts/render-dry-run.sh' || true)
+  dry_bypass=$(join_continuations <"${dry_plan}" \
+    | grep -c 'helm template' || true)
   [ "${dry_renders}" -gt 0 ] \
     || fail "install-dry-run (${dry_platform}): no renders in the plan"
-  [ "${dry_renders}" = "${dry_redacted}" ] \
-    || fail "install-dry-run (${dry_platform}): a render skips Secret redaction"
+  [ "${dry_bypass}" = 0 ] \
+    || fail "install-dry-run (${dry_platform}): a render bypasses the redacting wrapper"
 done
 
 # The dry run's helm commands are not echoed by make: recipe text can
@@ -1498,6 +1500,34 @@ grep -q 'events-single.json: <redacted>' "${TMP_DIR}/dryrun-configmap-file.out" 
   || fail "dry-run-configmap-file-redaction: a single-line JSON value was not masked"
 grep -q 'theme = dark' "${TMP_DIR}/dryrun-configmap-file.out" \
   || fail "dry-run-configmap-file-redaction: a non-credential one-line value was masked"
+
+# A customer-supplied value can be rejected by the values schema, and
+# Helm 3.22 and later print that value back in the error. The dry run
+# renders to the terminal and collected CI logs, so a rejected overlay
+# value must reach neither stream: the failure names the schema field
+# and nothing else. This goes through make and INFRA_VALUES_EXTRA, the
+# way an operator supplies an overlay.
+echo "checking dry-run-invalid-cidr-redaction (a rejected overlay value stays out)"
+bad_cidr="customer-vtep-$(date +%s)-$$"
+printf 'evpn:\n  vtepCIDR: %s\n' "${bad_cidr}" \
+  >"${TMP_DIR}/dryrun-invalid-cidr.yaml"
+if make -C "${INSTALLER_DIR}" --no-print-directory \
+    -o helm-deps -o helm-infra-deps -o helm-osac-deps \
+    -o validate-osac-chart-oci-ref install-dry-run \
+    PLATFORM=openshift PROFILE=bmaas-netbox-ci NS=osac \
+    DRY_RUN_OCP_VERSION=4.22 DRY_RUN_CLUSTER_DOMAIN=apps.example.com \
+    "INFRA_VALUES_EXTRA=-f values/bmaas-netbox-ci/infra.yaml -f ${TMP_DIR}/dryrun-invalid-cidr.yaml" \
+    EXTRA_HELM_ARGS=--set=bmf.netbox.tokenValue=${offline_token} \
+    >"${TMP_DIR}/dryrun-invalid-cidr.out" \
+    2>"${TMP_DIR}/dryrun-invalid-cidr.err"; then
+  fail "dry-run-invalid-cidr-redaction: the dry run accepted an invalid CIDR"
+fi
+grep -Fq "${bad_cidr}" "${TMP_DIR}/dryrun-invalid-cidr.out" \
+  "${TMP_DIR}/dryrun-invalid-cidr.err" \
+  && fail "dry-run-invalid-cidr-redaction: the rejected CIDR reached the dry-run logs"
+grep -Eq 'evpn[./]vtepCIDR: violates the values schema' \
+  "${TMP_DIR}/dryrun-invalid-cidr.err" \
+  || fail "dry-run-invalid-cidr-redaction: the failure did not name the schema field"
 
 # Container env entries are a plain-text channel for credentials: callers
 # can inject passwords into workload specs through values overlays (for

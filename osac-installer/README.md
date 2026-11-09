@@ -221,8 +221,11 @@ reach the terminal or CI logs:
 
 The `helm` commands themselves are not echoed, so an inline `--set`
 password in `EXTRA_HELM_ARGS` stays out of the log too; `EXTRA_HELM_ARGS`
-still applies to the OSAC chart. Do not include a
-Helm `--dry-run` flag in `EXTRA_HELM_ARGS`; rendering is intrinsic to this mode.
+still applies to the OSAC chart. A failed render reports only the
+values-schema field it rejected, because Helm 3.22 and later echo the
+offending value in its diagnostics and stderr is otherwise not printed.
+Do not include a Helm `--dry-run` flag in `EXTRA_HELM_ARGS`; rendering is
+intrinsic to this mode.
 
 #### Two-cluster VMaaS installation (OpenShift)
 
