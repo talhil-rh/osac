@@ -888,6 +888,17 @@ endif
 else
 install: validate-osac-inputs install-infra install-osac ## Full install: infra + osac (PLATFORM= PROFILE= required)
 endif
+# Under `make -j install` prerequisites with no dependency edge run in
+# parallel, so install-infra's namespace creation and readiness waits could
+# start while validate-osac-inputs is still rejecting a missing AAP license
+# or a non-https remote address. Order only the composite goal: standalone
+# `make install-infra` still needs no license, and DRY_RUN=1 maps install to
+# install-dry-run, which does no cluster change.
+ifneq ($(DRY_RUN),1)
+ifneq ($(filter install,$(MAKECMDGOALS)),)
+install-infra: validate-osac-inputs
+endif
+endif
 
 .PHONY: install-dry-run
 install-dry-run: validate-ns helm-deps validate-osac-chart-oci-ref ## Render every release in make install without connecting to a cluster
